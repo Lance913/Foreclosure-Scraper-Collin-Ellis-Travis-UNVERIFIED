@@ -1,21 +1,27 @@
 """
-Probe v4 -- Travis County: fix form interaction (popup was blocking clicks).
+Probe v5 -- Travis County: keyboard-driven combobox selection.
 
-v3 result: all 3 form interactions (department, date range, search) failed
-with "Locator.click: Timeout 5000ms exceeded" -- but the FIRST dump still
-printed something (date-range-looking option text), which strongly suggests
-the "Not sure where to start? Take the Tour" popup (visible overlaying the
-form in earlier screenshots) is intercepting pointer events / making the
-underlying combobox unreliable to hit via fuzzy text locators.
+v4 findings (confirmed via screenshots):
+  - Popup dismissal WORKS (00_baseline shows the "Take the Tour" popup;
+    01_after_dismiss is clean).
+  - The Department combobox's real interactive element is an <input
+    role="combobox" aria-label="Change department"> with a 0x0 bounding box
+    -- not directly clickable by Playwright (fails the visibility check and
+    times out). The VISIBLE box showing "Land Records" + chevron is a
+    styled wrapper. Clicking by visible TEXT worked fine in v1-v3 (options
+    appeared) -- the failure was almost certainly in the OPTION SELECTION
+    step (role=option name=X exact=True), not the opening.
+  - The aria live-region text explicitly confirms keyboard support: "Use Up
+    and Down to choose options, press Enter to select the currently focused
+    option" -- so drive it via keyboard instead of trying to click
+    individual option elements (sidesteps all visibility/overlap issues).
 
-v4 approach:
-  1. Explicitly dismiss the tour popup FIRST (try several strategies),
-     screenshot to confirm it's gone.
-  2. Use role=combobox (precise) instead of get_by_text (ambiguous -- "Land
-     Records" appears both as the current-value display AND as a list
-     option once opened).
-  3. Screenshot after every single interaction step so failures are visually
-     diagnosable, not just inferred from timeouts.
+v5 approach: click the VISIBLE TEXT to open each combobox (proven to work),
+then use ArrowDown + Enter (keyboard) to select, instead of clicking option
+elements directly. Confirmed order: department = [Land Records, Assumed
+Names, Marriage, Foreclosures]; date range = [Recorded Date(placeholder),
+Last 24 Hours, Last 3 Days, Last 1 Week, Last 2 Weeks, Last 1 Month, Last 3
+Months, Last 6 Months, Last 1 Year].
 """
 import logging
 import os
@@ -43,6 +49,7 @@ def dump_body_text(page, label, n=60):
     log.info(f"=== {label}: body text ({len(lines)} lines, showing first {n}) ===")
     for ln in lines[:n]:
         log.info(f"  | {ln}")
+    return lines
 
 
 def dump_table(page, label):
@@ -54,7 +61,7 @@ def dump_table(page, label):
         const rows = [];
         const t = document.querySelector('table');
         if (t) {
-            for (const tr of Array.from(t.querySelectorAll('tr')).slice(0, 8)) {
+            for (const tr of Array.from(t.querySelectorAll('tr')).slice(0, 10)) {
                 rows.push(Array.from(tr.querySelectorAll('th,td')).map(c => (c.textContent||'').trim()));
             }
         }
@@ -67,8 +74,6 @@ def dump_table(page, label):
 
 
 def dismiss_popups(page):
-    """Try several strategies to close the onboarding tour popup that
-    overlays the form on first load. Non-fatal if none match."""
     try:
         page.keyboard.press('Escape')
         page.wait_for_timeout(300)
@@ -85,8 +90,6 @@ def dismiss_popups(page):
                 page.wait_for_timeout(400)
         except Exception:
             pass
-    # Last resort: click a neutral spot (top-left corner) to blur/close any
-    # remaining transient tooltip.
     try:
         page.mouse.click(5, 5)
     except Exception:
@@ -105,89 +108,58 @@ def main():
         log.info(f"GOTO {PS_BASE}")
         page.goto(PS_BASE, wait_until='networkidle')
         page.wait_for_timeout(1200)
-        shot(page, '00_baseline')
-
         dismiss_popups(page)
         page.wait_for_timeout(500)
-        shot(page, '01_after_dismiss')
-        dump_body_text(page, 'after dismiss popups', n=40)
+        shot(page, '00_clean')
 
-        # Diagnostic pass: enumerate every combobox on the page BEFORE
-        # clicking anything, with its accessible name + bounding box.
+        # 1. Department -> Foreclosures via click-to-open + keyboard select.
         try:
-            comboboxes = page.evaluate("""() => {
-                const out = [];
-                document.querySelectorAll('[role="combobox"], select, [aria-haspopup="listbox"]').forEach(el => {
-                    const r = el.getBoundingClientRect();
-                    out.push({
-                        tag: el.tagName, role: el.getAttribute('role'),
-                        ariaLabel: el.getAttribute('aria-label') || '',
-                        text: (el.textContent||'').trim().slice(0,60),
-                        visible: r.width > 0 && r.height > 0,
-                        box: {x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)},
-                    });
-                });
-                return out;
-            }""")
-            log.info(f"comboboxes found: {comboboxes}")
-        except Exception as e:
-            log.error(f"combobox enumeration failed: {e}")
-            comboboxes = []
-
-        # 1. Department combobox -- should be the FIRST one in reading order.
-        try:
-            dept_combo = page.locator('[role="combobox"]').first
-            dept_combo.click(timeout=8000)
-            page.wait_for_timeout(700)
-            shot(page, '02_dept_open')
+            page.get_by_text('Land Records', exact=True).first.click(timeout=6000)
+            page.wait_for_timeout(600)
+            shot(page, '01_dept_open')
             opts = page.evaluate("""() => Array.from(document.querySelectorAll('[role="option"]'))
                 .map(el => (el.textContent||'').trim()).filter(Boolean)""")
-            log.info(f"dept dropdown options: {opts}")
-            page.get_by_role('option', name='Foreclosures', exact=True).click(timeout=5000)
+            log.info(f"dept options visible: {opts}")
+            for _ in range(3):
+                page.keyboard.press('ArrowDown')
+                page.wait_for_timeout(150)
+            page.keyboard.press('Enter')
             page.wait_for_timeout(1000)
-            shot(page, '03_dept_foreclosures_selected')
-            dump_body_text(page, 'after selecting Foreclosures', n=30)
+            shot(page, '02_dept_selected')
+            lines = dump_body_text(page, 'after dept keyboard-select', n=15)
+            log.info(f"dept now shows 'Foreclosures' in body text: {'Foreclosures' in lines}")
         except Exception as e:
             log.error(f"department selection failed: {e}", exc_info=True)
-            shot(page, '03_dept_FAILED')
+            shot(page, '02_dept_FAILED')
 
-        # 2. Date range combobox -- second one.
+        # 2. Date range -> broadest preset via click-to-open + keyboard select.
         try:
-            date_combo = page.locator('[role="combobox"]').nth(1)
-            date_combo.click(timeout=8000)
-            page.wait_for_timeout(700)
-            shot(page, '04_date_open')
+            date_trigger = page.get_by_text('Recorded Date', exact=True).first
+            date_trigger.click(timeout=6000)
+            page.wait_for_timeout(600)
+            shot(page, '03_date_open')
             opts = page.evaluate("""() => Array.from(document.querySelectorAll('[role="option"]'))
                 .map(el => (el.textContent||'').trim()).filter(Boolean)""")
-            log.info(f"date dropdown options: {opts}")
-            clicked = False
-            for label in ('Last 1 Year', 'Last 6 Months', 'Last 3 Months'):
-                try:
-                    page.get_by_role('option', name=label, exact=True).click(timeout=2000)
-                    log.info(f"selected date range preset: {label}")
-                    clicked = True
-                    break
-                except Exception:
-                    continue
-            if not clicked:
-                log.warning("no date preset matched by name -- trying last option in list")
-                try:
-                    page.locator('[role="option"]').last.click(timeout=2000)
-                    clicked = True
-                except Exception:
-                    pass
-            page.wait_for_timeout(800)
-            shot(page, '05_date_selected')
+            log.info(f"date options visible: {opts}")
+            # Press ArrowDown generously (more than the option count) to land
+            # on the LAST (broadest) option regardless of exact indexing --
+            # most listbox widgets clamp at the last item rather than wrap.
+            for _ in range(10):
+                page.keyboard.press('ArrowDown')
+                page.wait_for_timeout(100)
+            page.keyboard.press('Enter')
+            page.wait_for_timeout(1000)
+            shot(page, '04_date_selected')
+            dump_body_text(page, 'after date keyboard-select', n=15)
         except Exception as e:
             log.error(f"date range selection failed: {e}", exc_info=True)
-            shot(page, '05_date_FAILED')
+            shot(page, '04_date_FAILED')
 
-        dump_body_text(page, 'before clicking Search', n=30)
+        dump_body_text(page, 'before clicking Search', n=20)
 
-        # 3. Search button.
+        # 3. Search.
         try:
-            search_btn = page.locator('button[type="submit"], button:has-text("Search")').first
-            search_btn.scroll_into_view_if_needed(timeout=3000)
+            search_btn = page.locator('button:has-text("Search")').first
             search_btn.click(timeout=8000)
             page.wait_for_timeout(4000)
             try:
@@ -196,12 +168,12 @@ def main():
                 pass
             page.wait_for_timeout(1500)
             log.info(f"AFTER SEARCH: url={page.url} title={page.title()!r}")
-            shot(page, '06_after_search')
+            shot(page, '05_after_search')
             dump_table(page, 'after search')
-            dump_body_text(page, 'after search (full)', n=80)
+            dump_body_text(page, 'after search (full)', n=100)
         except Exception as e:
             log.error(f"search click failed: {e}", exc_info=True)
-            shot(page, '06_search_FAILED')
+            shot(page, '05_search_FAILED')
             dump_body_text(page, 'after search FAILED state', n=60)
 
         browser.close()
