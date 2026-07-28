@@ -1,43 +1,31 @@
 """
-Probe v7 -- Collin County Foreclosure Notices portal -- PAGINATION mechanics.
+Probe v8 -- Collin County Foreclosure Notices portal -- confirm "Next page"
+click mechanic (the actual mechanism the real scraper will use).
 
-Everything else is now understood (see probe v1-v6 history in git log):
-  - Real URL: https://apps2.collincountytx.gov/ForeclosureNotices (Blazor
-    Server + MudBlazor; NOT query-param driven -- must drive the live UI).
-  - Card = one <tr> whose single <td class="mud-table-cell..."> holds the
-    address <p> + a grid of labeled fields: City:, Sale Date:, File Date:,
-    Property Type:. No owner name / doc id anywhere (verified via a properly
-    -isolated single-card click -- no change). No CSV/export affordance.
-  - Full Property Type facet list (exact wording + current counts):
-      Commercial (C3) [2], Commercial (F1) [17], Residential Duplex (B2) [1],
-      Residential Mobile Home (A2) [2], Residential Single Family (A1) [352],
-      Residential Single Family (C1) [1], Residential Townhomes (A4) [18]
-    Sum = 393, matching the "All Properties Types [393/393]" facet -- the
-    other ~319 of 712 total records have NO property type classified.
-    Decision: filter Property Type IN CODE (substring match against a small
-    allow-list), not via the fragile UI popover -- simpler and more robust;
-    scrape all pages regardless of type.
-  - Page Size options: 5 / 10 / 25 only (no bigger page size available).
-  - ~29 pages at size 25 for ~712 total unfiltered records.
-
-THIS IS THE ONE REMAINING UNKNOWN before writing the real scraper:
-pagination mechanics (SYSTEM_GUIDE.md Sec.9 bug #2 -- "pagination can
-silently truncate" -- explicitly do not guess this).
+v7 found the pager buttons have STABLE unique aria-labels: "First page",
+"Previous page", "Page N", "Current page N", "Next page", "Last page" --
+"First page"/"Previous page" are disabled=True on page 1. The '...' element
+is decorative only (clicking it did nothing; the numbered-button window
+[1,2,3,4,5,6,28,29] appears fixed, not a real jump control). v7's numbered
+-button click test itself failed (Playwright role-name lookup needs the
+accessible name "Page 2", not the visible text "2") so the actual
+click-and-wait-for-change mechanic is still UNVERIFIED -- confirm it now
+before writing the real scraper (SYSTEM_GUIDE.md Sec.9 bug #2: pagination
+must wait for a real content change, never a fixed sleep, and must be
+proven, not assumed).
 
 Goals:
-  1. Dump the exact outerHTML of the pager control (button classes/aria/
-     structure) so we know a reliable selector for "next page".
-  2. Actually click from page 1 -> 2 -> 3, confirming real content changes
-     each time (compare first-card address), and log timing.
-  3. Check what happens once the visible page-number window needs to slide
-     (does a "..." exist and is it clickable, or is there a stable
-     next-page arrow icon we should use instead of numbered buttons).
-  4. Confirm the URL never changes across pages (so we know state truly
-     lives server-side and our scraper must stay on one page instance).
+  1. Click button[aria-label="Next page"] three times (page 1->2->3->4),
+     timing each click and confirming the first-card address actually
+     changes (not a stale/cached re-render).
+  2. Confirm the URL never changes (already expected, sanity re-check).
+  3. Click button[aria-label="Last page"] and see the final page's row
+     count (should be < 25) and whether "Next page" becomes disabled there.
+  4. Log the exact wait time needed so the real scraper's timeout is sized
+     correctly, not guessed.
 """
 import logging
 import os
-import re
 import time
 
 from playwright.sync_api import sync_playwright
@@ -45,16 +33,7 @@ from playwright.sync_api import sync_playwright
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [PROBE] %(message)s')
 log = logging.getLogger()
 
-ARTIFACT_DIR = 'probe_artifacts'
 URL = "https://apps2.collincountytx.gov/ForeclosureNotices"
-
-
-def save(name, content):
-    os.makedirs(ARTIFACT_DIR, exist_ok=True)
-    name = re.sub(r'[<>:"|?*\r\n]', '_', name)
-    with open(os.path.join(ARTIFACT_DIR, name), 'w') as f:
-        f.write(content)
-    log.info(f"  saved probe_artifacts/{name} ({len(content)} chars)")
 
 
 def wait_for_cards(page, timeout_ms=30000):
@@ -70,32 +49,50 @@ def wait_for_cards(page, timeout_ms=30000):
     return 0
 
 
-def first_card_signature(page):
-    """First card's address line -- used to detect a real page change."""
+def first_addr(page):
     try:
         return page.evaluate("""() => {
-            const all = Array.from(document.querySelectorAll('td.mud-table-cell'));
-            return all.length ? all[0].textContent.trim().slice(0, 80) : '';
+            const p = document.querySelector('td.mud-table-cell p.list-header, td.mud-table-cell p');
+            return p ? p.textContent.replace(/\\s+/g,' ').trim() : '';
         }""")
     except Exception:
         return ''
 
 
-def all_addresses(page):
+def row_count(page):
+    try:
+        return page.evaluate("() => document.querySelectorAll('td.mud-table-cell').length")
+    except Exception:
+        return -1
+
+
+def next_button_state(page):
     try:
         return page.evaluate("""() => {
-            const cells = Array.from(document.querySelectorAll('td.mud-table-cell'));
-            return cells.map(td => {
-                const p = td.querySelector('p.list-header, p');
-                return p ? p.textContent.replace(/\\s+/g,' ').trim() : '';
-            });
+            const b = document.querySelector('button[aria-label="Next page"]');
+            return b ? {disabled: b.disabled, exists: true} : {exists: false};
         }""")
     except Exception:
-        return []
+        return {'exists': False}
+
+
+def click_next(page, timeout_s=15):
+    before = first_addr(page)
+    t0 = time.monotonic()
+    page.locator('button[aria-label="Next page"]').click(timeout=8000)
+    deadline = time.monotonic() + timeout_s
+    changed = False
+    while time.monotonic() < deadline:
+        now = first_addr(page)
+        if now and now != before:
+            changed = True
+            break
+        page.wait_for_timeout(200)
+    dt = time.monotonic() - t0
+    return changed, dt, before, first_addr(page)
 
 
 def main():
-    os.makedirs(ARTIFACT_DIR, exist_ok=True)
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
             headless=True, args=['--disable-blink-features=AutomationControlled'])
@@ -111,113 +108,54 @@ def main():
         log.info("Loading page 1...")
         page.goto(URL, wait_until='domcontentloaded', timeout=45000)
         wait_for_cards(page)
-
-        # ---- 1. Dump the pager control's exact HTML ----
-        pager_html = page.evaluate("""() => {
-            // Find a button whose text is exactly '2' (a page-number button),
-            // then walk up to its containing nav/pagination wrapper.
-            const btns = Array.from(document.querySelectorAll('button'));
-            const two = btns.find(b => (b.textContent||'').trim() === '2');
-            if (!two) return null;
-            let el = two;
-            for (let i = 0; i < 5 && el.parentElement; i++) el = el.parentElement;
-            return el.outerHTML;
-        }""")
-        if pager_html:
-            save('pager_control.html', pager_html)
-            log.info(f"PAGER HTML:\n{pager_html[:4000]}")
-        else:
-            log.warning("Could not find a page-'2' button to anchor the pager dump.")
-
-        # Dump every button's full attribute set within the pager area (aria-label,
-        # title, disabled, class) -- specifically the icon-only ones flanking the
-        # numbered buttons (candidates for a stable "next page" selector).
-        pager_buttons = page.evaluate("""() => {
-            const btns = Array.from(document.querySelectorAll('button'));
-            return btns.map((b,i) => ({
-                i, text: (b.textContent||'').trim(),
-                aria: b.getAttribute('aria-label'), title: b.getAttribute('title'),
-                disabled: b.disabled, cls: b.className,
-            }));
-        }""")
-        log.info(f"ALL BUTTONS ({len(pager_buttons)}) with aria/title/disabled:")
-        for b in pager_buttons:
-            log.info(f"  {b}")
-
-        # ---- 2. Click page 1 -> 2 -> 3, confirm real content changes ----
         url0 = page.url
-        sig1 = first_card_signature(page)
-        addrs1 = all_addresses(page)
-        log.info(f"PAGE 1: url={url0} first_card={sig1!r} n_addrs={len(addrs1)}")
-        log.info(f"PAGE 1 addresses: {addrs1}")
+        log.info(f"PAGE 1: url={url0} first_addr={first_addr(page)!r} rows={row_count(page)} "
+                  f"next_btn={next_button_state(page)}")
 
-        for target_page in [2, 3]:
-            try:
-                btn = page.get_by_role('button', name=str(target_page), exact=True).first
-                if btn.count() == 0:
-                    log.warning(f"No button labelled {target_page!r} found -- stopping pagination test.")
+        seen_first_addrs = [first_addr(page)]
+        for i in range(3):
+            changed, dt, before, after = click_next(page)
+            url_now = page.url
+            log.info(f"CLICK NEXT #{i+1}: changed={changed} took={dt:.2f}s "
+                      f"before={before!r} after={after!r} "
+                      f"url_same={url_now == url0} rows={row_count(page)} "
+                      f"next_btn={next_button_state(page)}")
+            seen_first_addrs.append(after)
+            if not changed:
+                log.warning(f"  Content did NOT change on click #{i+1} -- investigating body text.")
+                snippet = page.evaluate("() => document.body.innerText.slice(0,800)")
+                log.info(f"  Body text snippet: {snippet}")
+
+        log.info(f"All first-addresses seen across pages 1-4: {seen_first_addrs}")
+        log.info(f"All unique: {len(set(seen_first_addrs)) == len(seen_first_addrs)}")
+
+        # Jump straight to the last page.
+        try:
+            log.info("Clicking Last page...")
+            before = first_addr(page)
+            t0 = time.monotonic()
+            page.locator('button[aria-label="Last page"]').click(timeout=8000)
+            deadline = time.monotonic() + 15
+            changed = False
+            while time.monotonic() < deadline:
+                now = first_addr(page)
+                if now and now != before:
+                    changed = True
                     break
-                before_sig = first_card_signature(page)
-                t0 = time.monotonic()
-                btn.click(timeout=8000)
-                # Wait for the first card to actually change.
-                changed = False
-                deadline = time.monotonic() + 10
-                while time.monotonic() < deadline:
-                    now_sig = first_card_signature(page)
-                    if now_sig and now_sig != before_sig:
-                        changed = True
-                        break
-                    page.wait_for_timeout(200)
-                dt = time.monotonic() - t0
-                sig_n = first_card_signature(page)
-                addrs_n = all_addresses(page)
-                url_n = page.url
-                log.info(f"PAGE {target_page}: clicked in {dt:.2f}s, changed={changed}, "
-                         f"url={url_n} (same_as_page1={url_n == url0}) "
-                         f"first_card={sig_n!r} n_addrs={len(addrs_n)}")
-                log.info(f"PAGE {target_page} addresses: {addrs_n}")
-                overlap = set(addrs1) & set(addrs_n)
-                log.info(f"PAGE {target_page}: overlap with page 1 addresses: {overlap}")
-            except Exception as e:
-                log.warning(f"Pagination to page {target_page} failed: {e}")
-                break
-
-        # ---- 3. Jump toward the tail to see how the sliding window / ellipsis behaves ----
-        try:
-            ell = page.get_by_text('...', exact=True).first
-            if ell.count() > 0:
-                log.info("Found a '...' element -- attempting to click it.")
-                before_sig = first_card_signature(page)
-                ell.click(timeout=5000)
-                page.wait_for_timeout(1500)
-                after_sig = first_card_signature(page)
-                log.info(f"After clicking '...': first_card {before_sig!r} -> {after_sig!r}")
-                # Dump what page-number buttons are visible now.
-                nums = page.evaluate("""() => Array.from(document.querySelectorAll('button'))
-                    .map(b => (b.textContent||'').trim()).filter(t => /^\\d+$/.test(t))""")
-                log.info(f"Visible page-number buttons after '...' click: {nums}")
-            else:
-                log.info("No '...' element found (button-only pager, or all pages fit).")
+                page.wait_for_timeout(200)
+            dt = time.monotonic() - t0
+            log.info(f"LAST PAGE: changed={changed} took={dt:.2f}s rows={row_count(page)} "
+                      f"first_addr={first_addr(page)!r} next_btn={next_button_state(page)} "
+                      f"url_same={page.url == url0}")
+            # What page number is this, per the "Current page N" aria-label?
+            cur = page.evaluate("""() => {
+                const b = Array.from(document.querySelectorAll('button')).find(
+                    b => (b.getAttribute('aria-label')||'').startsWith('Current page'));
+                return b ? b.getAttribute('aria-label') : null;
+            }""")
+            log.info(f"LAST PAGE label: {cur}")
         except Exception as e:
-            log.warning(f"Ellipsis click test failed: {e}")
-
-        # ---- 4. Try the last page button directly (label '29') to test far jump ----
-        try:
-            last_btn = page.get_by_role('button', name='29', exact=True).first
-            if last_btn.count() > 0:
-                before_sig = first_card_signature(page)
-                last_btn.click(timeout=8000)
-                page.wait_for_timeout(2000)
-                after_sig = first_card_signature(page)
-                addrs_last = all_addresses(page)
-                log.info(f"PAGE 29 (direct click): first_card {before_sig!r} -> {after_sig!r}; "
-                         f"n_addrs={len(addrs_last)}")
-                log.info(f"PAGE 29 addresses: {addrs_last}")
-            else:
-                log.info("No page-'29' button visible directly (expected if window slid).")
-        except Exception as e:
-            log.warning(f"Direct last-page click failed: {e}")
+            log.warning(f"Last-page click failed: {e}")
 
         log.info("=== PROBE COMPLETE ===")
         browser.close()
