@@ -12,9 +12,18 @@ on it, add another thin wrapper here (or override `_reach_results_page()`
 too, if that county's tenant also needs form-driven search instead of the
 direct results-URL shape).
 """
-from datetime import date
+import os
+from datetime import date, timedelta
 
 from .publicsearch import PublicSearchScraper, DEFAULT_WINDOW_DAYS
+
+# How far forward to search for upcoming sale dates if the Sale Date control
+# turns out to be an explicit date-range picker rather than a preset listbox
+# (unconfirmed -- see TravisCountyScraper._reach_results_page). TX trustee
+# sales are posted >=21 days ahead and happen the first Tuesday of the month,
+# so a ~180 day forward window comfortably covers "upcoming" without being
+# unbounded.
+SALE_DATE_HORIZON_DAYS = int(os.environ.get('TRAVIS_SALE_DATE_HORIZON_DAYS', '180'))
 
 
 class TravisCountyScraper(PublicSearchScraper):
@@ -111,15 +120,46 @@ class TravisCountyScraper(PublicSearchScraper):
             "() => Array.from(document.querySelectorAll('[role=\"option\"]'))"
             ".map(el => (el.textContent||'').trim()).filter(Boolean)")
         self.logger.info(f"{self.county}: date range options: {date_opts}")
-        # Press ArrowDown generously to land on the LAST (broadest) option
-        # regardless of exact list length -- most listbox widgets clamp at
-        # the last item rather than wrap around. Same pattern proven for
-        # the Department field above.
-        for _ in range(10):
-            page.keyboard.press('ArrowDown')
-            page.wait_for_timeout(100)
-        page.keyboard.press('Enter')
-        page.wait_for_timeout(1000)
+
+        if date_opts:
+            # Listbox behaves like the Department field -- press ArrowDown
+            # generously to land on the LAST (broadest) option regardless of
+            # exact list length -- most listbox widgets clamp at the last
+            # item rather than wrap around.
+            for _ in range(10):
+                page.keyboard.press('ArrowDown')
+                page.wait_for_timeout(100)
+            page.keyboard.press('Enter')
+            page.wait_for_timeout(1000)
+        else:
+            # No listbox options appeared -- this control likely isn't a
+            # preset dropdown (e.g. a raw calendar date-picker instead).
+            # Fall back to filling explicit date inputs directly with a
+            # forward-looking window, since "Sale Date" for an upcoming
+            # auction is inherently a future date, not a past one.
+            self.logger.warning(
+                f"{self.county}: no listbox options after opening date range -- "
+                f"trying explicit date inputs instead (unconfirmed fallback).")
+            try:
+                page.keyboard.press('Escape')
+            except Exception:
+                pass
+            page.wait_for_timeout(300)
+            end_date = target_date + timedelta(days=SALE_DATE_HORIZON_DAYS)
+            date_inputs = page.locator('input[type="date"], input[placeholder*="date" i]')
+            n = date_inputs.count()
+            self.logger.info(f"{self.county}: found {n} date-like input(s) for fallback fill")
+            if n >= 2:
+                date_inputs.nth(0).fill(target_date.strftime('%m/%d/%Y'))
+                date_inputs.nth(1).fill(end_date.strftime('%m/%d/%Y'))
+            elif n == 1:
+                date_inputs.nth(0).fill(target_date.strftime('%m/%d/%Y'))
+            else:
+                self.logger.error(
+                    f"{self.county}: no date range control matched either the "
+                    f"listbox or explicit-input pattern -- Search will run "
+                    f"with whatever default date range is pre-selected.")
+            page.wait_for_timeout(500)
 
         # 3. Search.
         search_btn = page.locator('button:has-text("Search")').first
