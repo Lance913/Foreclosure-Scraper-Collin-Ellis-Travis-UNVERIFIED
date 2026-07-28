@@ -1,40 +1,29 @@
 """
-Probe v5 -- Collin County Foreclosure Notices portal.
+Probe v6 -- Collin County Foreclosure Notices portal.
 
-Confirmed so far: https://apps2.collincountytx.gov/ForeclosureNotices is a
-Blazor SERVER app (MudBlazor UI, SignalR/_blazor transport -- NOT a plain
-JSON REST API, NOT query-param driven; state lives server-side over a
-persistent connection, so the URL does not change with filters/pagination).
-Card list (25/page, ~29 pages, ~712 total) shows per record: street+city/
-state/zip address, City, Sale Date, File Date, Property Type (e.g.
-"Residential Single Family (A1)", "Residential Townhomes (A4)",
-"Residential Duplex (B2)" -- so more types exist than the two hinted at).
-NO owner name / doc id visible in the card text so far. "All Properties
-Types [393/393]" facet total is LOWER than "All Dates [712/712]" -- needs
-explaining (some records may have no property type classification).
-Previous click-through attempt used a broken DOM-isolation heuristic (grabbed
-the whole page) so it proved nothing -- redo properly this round.
+v5 crashed: `page.goto(..., wait_until='networkidle')` timed out (45s) on the
+very first navigation. The page embeds a Leaflet/ArcGIS map that keeps
+fetching tiles, so network activity may never go idle -- 'networkidle' is
+the wrong wait condition here (this is exactly SYSTEM_GUIDE.md Sec.9 bug #1
+territory: a bad wait condition silently costing us the whole probe). Fix:
+navigate with 'domcontentloaded' and poll for real content (the string
+"Property Type:" appearing in body text) instead. Also: do ONE navigation
+for the whole probe (use the in-app "Reset Filters" button between
+experiments, not repeated page.goto), and wrap every section in try/except
+so one flaky step doesn't kill everything else.
 
-This pass, all against https://apps2.collincountytx.gov/ForeclosureNotices:
-  1. Properly isolate ONE card's outerHTML (walk up from a leaf containing
-     "Property Type:" only while still inside a single "Property Type:"
-     occurrence) -- check for hidden ids/links/doc numbers.
-  2. Click that ONE real card and watch for ANY change: URL, new DOM node
-     count, body text diff, new network activity.
-  3. Open the Property Type filter popover properly (scope query to
-     mud-popover/mud-list content that appears after the click, not the
-     whole document) -- get the FULL authoritative option list.
-  4. Open the Page Size filter the same way -- what values are offered.
-  5. Try clicking a Leaflet map marker/cluster -- does a popup reveal more.
-  6. Look for an export/download/CSV/Excel/print affordance anywhere
-     (title/aria-label on any element, not just visible text).
-  7. Toggle Property Type to ONLY "Residential Single Family" + "Residential
-     Mobile Home" (if present) and see how the total count changes, to sanity
-     -check the 393-vs-712 facet-count mystery.
+Goals still open from v4/v5 (v5 crashed before gathering anything new):
+  1. Isolate + click one real card -- does anything happen (owner name/doc id)?
+  2. Full, correctly-scoped Property Type filter option list (exact wording).
+  3. Page Size options.
+  4. Map marker click -> popup with more info?
+  5. Any export/download/CSV/print affordance.
+  6. Toggle to only 2 property types -- does the total count/page count drop?
 """
 import logging
 import os
 import re
+import time
 
 from playwright.sync_api import sync_playwright
 
@@ -96,8 +85,33 @@ def save(name, content):
     log.info(f"  saved {path} ({len(content)} chars)")
 
 
+def wait_for_cards(page, timeout_ms=30000):
+    """Poll until real card content is present (avoids 'networkidle', which
+    never resolves because of the embedded map's continuous tile requests)."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    last_n = 0
+    while time.monotonic() < deadline:
+        try:
+            last_n = page.evaluate(
+                "() => (document.body.innerText.match(/Property Type:/g)||[]).length")
+        except Exception:
+            last_n = 0
+        if last_n > 0:
+            return last_n
+        try:
+            no_results = page.evaluate(
+                "() => /no results|no records|nothing found/i.test(document.body.innerText||'')")
+        except Exception:
+            no_results = False
+        if no_results:
+            log.info("  page explicitly reports no results.")
+            return 0
+        page.wait_for_timeout(500)
+    log.warning(f"  cards never appeared within {timeout_ms/1000:.0f}s (last count={last_n}).")
+    return last_n
+
+
 def dump_popover(page, label):
-    """After a click that should have opened a MudBlazor popover, log its content."""
     info = page.evaluate("""() => {
         const pops = Array.from(document.querySelectorAll('.mud-popover, [class*="popover"]'));
         return pops.map(p => ({
@@ -107,21 +121,27 @@ def dump_popover(page, label):
                 tag: i.tagName, text: (i.textContent||'').trim().slice(0,80),
                 type: i.type, checked: i.checked,
             })),
-            textPreview: (p.textContent||'').trim().slice(0, 400),
+            textPreview: (p.textContent||'').trim().slice(0, 500),
         }));
     }""")
     log.info(f"  POPOVERS after {label!r} click: {len(info)}")
     for p in info:
+        if not p['visible']:
+            continue
         log.info(f"    cls={p['cls']!r} visible={p['visible']} items={len(p['items'])}")
         seen = set()
         for it in p['items']:
             key = it['text']
-            if key in seen:
+            if key in seen or not key:
                 continue
             seen.add(key)
             log.info(f"      {it}")
         if not p['items']:
             log.info(f"      textPreview: {p['textPreview']!r}")
+
+
+def section(name):
+    log.info(f"\n########## SECTION: {name} ##########")
 
 
 def main():
@@ -136,29 +156,35 @@ def main():
         page = ctx.new_page()
         page.add_init_script(
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
-        page.set_default_timeout(30000)
+        page.set_default_timeout(20000)
 
-        log.info(f"Navigating to {URL}")
-        page.goto(URL, wait_until='networkidle', timeout=45000)
-        page.wait_for_timeout(2500)
+        section("Initial load")
+        page.goto(URL, wait_until='domcontentloaded', timeout=45000)
+        n = wait_for_cards(page)
+        log.info(f"Cards ready: {n} 'Property Type:' occurrences found on load.")
 
         # ---- 1. Isolate one card properly ----
-        card = page.evaluate(ISOLATE_CARD_JS)
-        if card:
-            log.info(f"===== ISOLATED CARD tag={card['tag']} cls={card['cls']!r} =====")
-            save('sample_card_v2.html', card['html'])
-            log.info(f"CARD HTML:\n{card['html']}")
-        else:
-            log.warning("Could not isolate a card.")
+        section("Isolate + inspect one card")
+        try:
+            card = page.evaluate(ISOLATE_CARD_JS)
+            if card:
+                log.info(f"ISOLATED CARD tag={card['tag']} cls={card['cls']!r}")
+                save('sample_card_v2.html', card['html'])
+                log.info(f"CARD HTML:\n{card['html']}")
+            else:
+                log.warning("Could not isolate a card.")
+        except Exception as e:
+            log.warning(f"Card isolation failed: {e}")
 
         # ---- 2. Click that one card, watch for changes ----
-        marked = page.evaluate(MARK_CARD_JS)
-        log.info(f"Marked card for click: {marked}")
-        if marked:
-            before_text = page.evaluate("() => document.body.innerText || ''")
-            before_nodes = page.evaluate("() => document.querySelectorAll('*').length")
-            url_before = page.url
-            try:
+        section("Click one card")
+        try:
+            marked = page.evaluate(MARK_CARD_JS)
+            log.info(f"Marked card for click: {marked}")
+            if marked:
+                before_text = page.evaluate("() => document.body.innerText || ''")
+                before_nodes = page.evaluate("() => document.querySelectorAll('*').length")
+                url_before = page.url
                 page.locator('[data-probe-target="1"]').first.click(timeout=8000, force=True)
                 page.wait_for_timeout(2500)
                 url_after = page.url
@@ -170,26 +196,22 @@ def main():
                 if before_text != after_text:
                     save('after_card_click_body.txt', after_text)
                     log.info(f"NEW BODY TEXT (first 3000):\n{after_text[:3000]}")
-                save('after_card_click.html', page.content())
-            except Exception as e:
-                log.warning(f"Card click failed: {e}")
-
-        # Reload fresh for the next experiments (avoid compounding state).
-        page.goto(URL, wait_until='networkidle', timeout=45000)
-        page.wait_for_timeout(2000)
+        except Exception as e:
+            log.warning(f"Card click experiment failed: {e}")
 
         # ---- 3. Property Type filter popover ----
+        section("Property Type filter popover")
         try:
             page.get_by_text('All Properties Types', exact=False).first.click(timeout=8000)
             page.wait_for_timeout(1200)
             dump_popover(page, 'Property Types')
-            save('property_type_popover.html', page.content())
             page.keyboard.press('Escape')
             page.wait_for_timeout(500)
         except Exception as e:
             log.warning(f"Property Type popover failed: {e}")
 
         # ---- 4. Page Size filter ----
+        section("Page Size filter popover")
         try:
             page.get_by_label('Page Size', exact=False).first.click(timeout=8000)
             page.wait_for_timeout(1000)
@@ -197,16 +219,10 @@ def main():
             page.keyboard.press('Escape')
             page.wait_for_timeout(500)
         except Exception as e:
-            log.warning(f"Page Size popover failed (trying alt selector): {e}")
-            try:
-                page.locator('text=Page Size').first.click(timeout=5000)
-                page.wait_for_timeout(1000)
-                dump_popover(page, 'Page Size (alt)')
-                page.keyboard.press('Escape')
-            except Exception as e2:
-                log.warning(f"  alt also failed: {e2}")
+            log.warning(f"Page Size popover failed: {e}")
 
         # ---- 5. Map marker click ----
+        section("Map marker click")
         try:
             marker = page.locator('.leaflet-marker-icon, .leaflet-interactive').first
             if marker.count() > 0:
@@ -217,23 +233,29 @@ def main():
                     return p ? p.textContent.trim() : null;
                 }""")
                 log.info(f"Map marker click -> popup text: {popup_text!r}")
-                save('map_popup.html', page.content())
             else:
                 log.info("No leaflet marker found to click.")
         except Exception as e:
             log.warning(f"Map marker click failed: {e}")
 
         # ---- 6. Export/download affordance anywhere ----
-        exporters = page.evaluate(ALL_TITLED_JS)
-        log.info(f"Elements with export/download/csv/excel/print title or aria: {exporters}")
-
-        # ---- 7. Filter to only Single Family + Mobile Home, check count ----
-        page.goto(URL, wait_until='networkidle', timeout=45000)
-        page.wait_for_timeout(2000)
+        section("Export/download affordance search")
         try:
+            exporters = page.evaluate(ALL_TITLED_JS)
+            log.info(f"Elements with export/download/csv/excel/print title or aria: {exporters}")
+        except Exception as e:
+            log.warning(f"Export search failed: {e}")
+
+        # ---- 7. Filter to Single Family + Mobile Home only, check count ----
+        section("Toggle Property Type filter, observe count")
+        try:
+            # Reset first so we start from a known baseline.
+            page.get_by_role('button', name='RESET FILTERS').click(timeout=5000)
+            page.wait_for_timeout(1500)
+            wait_for_cards(page)
+
             page.get_by_text('All Properties Types', exact=False).first.click(timeout=8000)
             page.wait_for_timeout(1000)
-            # Try to find a "Select All" toggle to clear it first, then pick two.
             all_items = page.evaluate("""() => {
                 const pops = Array.from(document.querySelectorAll('.mud-popover, [class*="popover"]'));
                 let out = [];
@@ -243,11 +265,12 @@ def main():
                 }
                 return out;
             }""")
-            log.info(f"Property Type list items while open: {all_items}")
+            log.info(f"Property Type list items while open ({len(all_items)}): {all_items}")
+            save('property_type_items.txt', '\n'.join(all_items))
         except Exception as e:
-            log.warning(f"Step 7 failed: {e}")
+            log.warning(f"Toggle-filter section failed: {e}")
 
-        log.info("=== PROBE COMPLETE ===")
+        log.info("\n=== PROBE COMPLETE ===")
         browser.close()
 
 
