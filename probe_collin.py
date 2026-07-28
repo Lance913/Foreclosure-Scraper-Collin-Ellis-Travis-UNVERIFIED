@@ -1,21 +1,22 @@
 """
-Probe v2 -- Collin County Foreclosure Notices portal.
+Probe v3 -- Collin County Foreclosure Notices portal.
 
-v1 result: https://apps.collincountytx.gov/ForeclosureNotices -> HTTP 404
-("File or directory not found" -- classic IIS 404 page), reachable (no
-geo-block, no timeout). So the exact assignment URL is off somehow -- find
-the real path.
+v1: https://apps.collincountytx.gov/ForeclosureNotices -> 404 (IIS "File or
+    directory not found").
+v2: apps.collincountytx.gov/ is a bare default IIS placeholder (no directory
+    listing). www.collincountytx.gov homepage has no "foreclosure" link, but
+    has a "County Clerk" link (/county-clerk). The site also has an apps2
+    subdomain (apps2.collincountytx.gov, used for judicial search) -- so
+    "apps" numbering may vary per tool.
 
 This pass:
-  1. Dump https://apps.collincountytx.gov/ (root) -- links + page text.
-  2. Try a handful of case/slash/naming variations of the ForeclosureNotices
-     path directly.
-  3. Dump the main county site (collincountytx.gov) for a nav link or search
-     result mentioning "foreclosure".
+  1. Dump the /county-clerk page fully -- links + text -- looking for a
+     foreclosure-notices / trustee-sale link.
+  2. Try that page's search feature if present.
+  3. Try apps2/apps3.collincountytx.gov variants of the ForeclosureNotices path.
 """
 import logging
 import os
-import sys
 
 from playwright.sync_api import sync_playwright
 
@@ -24,23 +25,15 @@ log = logging.getLogger()
 
 ARTIFACT_DIR = 'probe_artifacts'
 
-CANDIDATES = [
-    "https://apps.collincountytx.gov/",
-    "https://apps.collincountytx.gov/ForeclosureNotices",
-    "https://apps.collincountytx.gov/ForeclosureNotices/",
-    "https://apps.collincountytx.gov/foreclosurenotices",
-    "https://apps.collincountytx.gov/Foreclosure",
-    "https://apps.collincountytx.gov/ForeclosureNotice",
-    "https://apps.collincountytx.gov/ForeclosureSearch",
-    "https://apps.collincountytx.gov/ForeclosureNotices/Search",
-    "https://apps.collincountytx.gov/ForeclosureNotices/Default.aspx",
-    "https://apps.collincountytx.gov/ForeclosureNotices/Home",
-    "https://www.collincountytx.gov/",
+APP_HOST_CANDIDATES = [
+    "https://apps2.collincountytx.gov/ForeclosureNotices",
+    "https://apps3.collincountytx.gov/ForeclosureNotices",
+    "https://apps.collincountytx.gov/ForeclosureNotices2",
 ]
 
 DUMP_LINKS_JS = """() => {
     return Array.from(document.querySelectorAll('a')).map(a => ({
-        text: (a.textContent || '').trim().slice(0, 90),
+        text: (a.textContent || '').trim().slice(0, 100),
         href: a.getAttribute('href'),
     })).filter(l => l.text || l.href);
 }"""
@@ -48,44 +41,18 @@ DUMP_LINKS_JS = """() => {
 
 def safe_name(url):
     return (url.replace('https://', '').replace('http://', '')
-            .replace('/', '_').strip('_') or 'root')
+            .replace('/', '_').replace('?', '_').strip('_') or 'root')
 
 
-def probe_url(page, url):
-    log.info(f"----- Trying {url} -----")
+def snapshot(page, url):
+    os.makedirs(ARTIFACT_DIR, exist_ok=True)
+    name = safe_name(url)
+    with open(os.path.join(ARTIFACT_DIR, f'{name}.html'), 'w') as f:
+        f.write(page.content())
     try:
-        resp = page.goto(url, wait_until='domcontentloaded', timeout=30000)
-        status = resp.status if resp else None
-        log.info(f"  status={status} final_url={page.url} title={page.title()!r}")
-    except Exception as e:
-        log.info(f"  FAILED to load: {str(e)[:200]}")
-        return
-    try:
-        page.wait_for_load_state('networkidle', timeout=10000)
+        page.screenshot(path=os.path.join(ARTIFACT_DIR, f'{name}.png'), full_page=True)
     except Exception:
         pass
-    page.wait_for_timeout(800)
-
-    body_text = page.evaluate("() => (document.body.innerText || '').trim()")
-    log.info(f"  body length={len(body_text)}; first 500 chars: {body_text[:500]!r}")
-
-    is_404 = ('not found' in body_text.lower()[:200]) or (status and status >= 400)
-    if not is_404 or 'foreclosure' in body_text.lower():
-        # Worth a closer look -- dump links and save a snapshot.
-        links = page.evaluate(DUMP_LINKS_JS)
-        interesting = [l for l in links if 'foreclos' in (l['text'] + str(l['href'])).lower()]
-        if interesting:
-            log.info(f"  LINKS mentioning 'foreclos': {interesting}")
-        else:
-            log.info(f"  total links: {len(links)}; first 25: {links[:25]}")
-        os.makedirs(ARTIFACT_DIR, exist_ok=True)
-        name = safe_name(url)
-        with open(os.path.join(ARTIFACT_DIR, f'{name}.html'), 'w') as f:
-            f.write(page.content())
-        try:
-            page.screenshot(path=os.path.join(ARTIFACT_DIR, f'{name}.png'), full_page=True)
-        except Exception:
-            pass
 
 
 def main():
@@ -102,21 +69,55 @@ def main():
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         page.set_default_timeout(30000)
 
-        for url in CANDIDATES:
-            probe_url(page, url)
-
-        # Try the main site's own search box for "foreclosure" if one exists.
-        log.info("----- Searching www.collincountytx.gov for 'foreclosure' links -----")
+        # 1) County Clerk page -- full dump.
+        url = "https://www.collincountytx.gov/county-clerk"
+        log.info(f"----- {url} -----")
         try:
-            page.goto("https://www.collincountytx.gov/", wait_until='networkidle', timeout=30000)
-            page.wait_for_timeout(1000)
-            links = page.evaluate(DUMP_LINKS_JS)
-            hits = [l for l in links if 'foreclos' in (l['text'] + str(l['href'])).lower()]
-            log.info(f"Homepage links mentioning 'foreclos': {hits}")
-            clerk_links = [l for l in links if 'clerk' in (l['text'] + str(l['href'])).lower()]
-            log.info(f"Homepage links mentioning 'clerk': {clerk_links}")
+            resp = page.goto(url, wait_until='networkidle', timeout=30000)
+            log.info(f"  status={resp.status if resp else None} final_url={page.url} title={page.title()!r}")
         except Exception as e:
-            log.warning(f"main site probe failed: {e}")
+            log.warning(f"  load failed: {e}")
+        page.wait_for_timeout(1000)
+        body_text = page.evaluate("() => (document.body.innerText || '').trim()")
+        log.info(f"  BODY TEXT (first 4000 chars):\n{body_text[:4000]}")
+        links = page.evaluate(DUMP_LINKS_JS)
+        log.info(f"  ALL LINKS ({len(links)}):")
+        for l in links:
+            log.info(f"    {l}")
+        snapshot(page, url)
+
+        # 2) Site-wide search for "foreclosure" if the site exposes /search?q=
+        for search_url in [
+            "https://www.collincountytx.gov/search?q=foreclosure",
+            "https://www.collincountytx.gov/Search?searchPhrase=foreclosure",
+        ]:
+            log.info(f"----- {search_url} -----")
+            try:
+                resp = page.goto(search_url, wait_until='networkidle', timeout=20000)
+                log.info(f"  status={resp.status if resp else None} final_url={page.url}")
+                page.wait_for_timeout(1000)
+                txt = page.evaluate("() => (document.body.innerText || '').trim()")
+                log.info(f"  body first 2000 chars: {txt[:2000]}")
+                slinks = page.evaluate(DUMP_LINKS_JS)
+                hits = [l for l in slinks if 'foreclos' in (l['text'] + str(l['href'])).lower()]
+                log.info(f"  links mentioning 'foreclos': {hits}")
+            except Exception as e:
+                log.warning(f"  failed: {e}")
+
+        # 3) Alternate app-host guesses.
+        for url in APP_HOST_CANDIDATES:
+            log.info(f"----- Trying {url} -----")
+            try:
+                resp = page.goto(url, wait_until='domcontentloaded', timeout=20000)
+                status = resp.status if resp else None
+                title = page.title()
+                log.info(f"  status={status} final_url={page.url} title={title!r}")
+                if status and status < 400:
+                    txt = page.evaluate("() => (document.body.innerText || '').trim()")
+                    log.info(f"  body first 1000: {txt[:1000]}")
+                    snapshot(page, url)
+            except Exception as e:
+                log.info(f"  FAILED: {str(e)[:150]}")
 
         log.info("=== PROBE COMPLETE ===")
         browser.close()
