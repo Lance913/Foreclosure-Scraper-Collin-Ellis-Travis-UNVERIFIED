@@ -1,6 +1,19 @@
 name: Probe Travis County Portal
 
+# NOTE: workflow_dispatch requires the workflow file to be registered on the
+# default branch before `gh workflow run` can find it by name -- which we
+# deliberately avoid (no direct pushes/merges to main during investigation,
+# per SYSTEM_GUIDE.md's PR-only rule on the default branch). `push` does not
+# have that limitation (the run is built directly from the pushed commit's
+# copy of this file), so that's the primary trigger during probing -- just
+# `git push` to this branch and a new run starts automatically. This whole
+# file is throwaway and gets deleted once the real scraper is written.
 on:
+  push:
+    branches: [add-travis-scraper]
+    paths:
+      - 'probe_travis.py'
+      - '.github/workflows/probe_travis.yml'
   workflow_dispatch:
 
 jobs:
