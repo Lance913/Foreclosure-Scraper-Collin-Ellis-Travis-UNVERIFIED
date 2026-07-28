@@ -1,48 +1,42 @@
 """
-Probe v2 -- Travis County portal reconnaissance.
+Probe v3 -- Travis County: drive the real Quick Search form for Foreclosures.
 
-Findings from v1:
-  - tccsearch.org (assigned portal) fully TIMES OUT (30s, no response at all)
-    even from the GitHub Actions Azure US runner -- not a clean 403. Need to
-    characterize the failure mode (DNS/TCP/TLS/WAF-hang) with a longer
-    timeout and a plain HTTP client (no browser overhead).
-  - travis.tx.publicsearch.us is LIVE, and genuinely official ("COUNTY CLERK
-    Dyana Limon-Mercado" -- the real Travis County Clerk). Quick Search shows
-    a "Department" dropdown defaulting to "Land Records". The
-    /search/advanced route 500s with a raw "Internal Server Error" (not a
-    styled error page -- looks like a real backend bug or an unconfigured
-    route for this tenant).
+Findings from v1+v2:
+  - tccsearch.org (assigned portal) is behind an ACTIVE Cloudflare bot
+    challenge ("Just a moment... Performing security verification") on both
+    plain `requests` and Playwright, from the GitHub Actions US runner. This
+    is not a simple geo-block -- it's Cloudflare's managed challenge
+    (cf-mitigated: challenge), which headless Chromium does not pass. Not
+    ruling it out permanently, but it's a bad sign for a daily unattended job.
+  - travis.tx.publicsearch.us IS live and official, and its Department
+    dropdown genuinely has: Land Records, Assumed Names, Marriage,
+    **Foreclosures**. Guessed query codes (department=FC/LR/NOS/FORECLOSURE)
+    via direct URL did NOT work cleanly (mix of "Error with search query"
+    and blank "Error" pages) -- Travis's tenant likely uses a different
+    department code/id than the other 5 counties' publicsearch instances.
+  - The /search/advanced route itself 500s on direct navigation but loads
+    (blank) via client-side click-through. Quick Search, however, already
+    exposes Department + Search Term + Date Range + Search -- no need to
+    fight the advanced-search route at all.
 
-v2 goals:
-  1. tccsearch.org: plain `requests` GET with a long timeout + full header/
-     status dump (fast, cheap, disambiguates hang type). Also retry via
-     Playwright with `domcontentloaded` (not `networkidle`, which can hang
-     forever on background polling) and a longer timeout.
-  2. travis.tx.publicsearch.us: enumerate the REAL department dropdown
-     options on the working Quick Search page (not the broken /search/
-     advanced route). Then test the direct results-URL pattern (used
-     successfully for Bexar/Dallas/Tarrant/Denton/Johnson) for BOTH a
-     Foreclosures-like department (if one exists in the dropdown) AND Land
-     Records (known-good control), to see if the query API works even
-     though the advanced-search form page doesn't.
+v3 goal: drive the QUICK SEARCH form for real (select Foreclosures
+department, pick the broadest date-range preset, submit), and read off:
+  - the actual resulting URL (so we learn the real query param format for
+    fast direct-navigation later, mirroring the other 5 counties' pattern),
+  - the results table schema (headers + sample rows), or the empty/error
+    state if there's genuinely nothing in that window.
 """
 import logging
 import os
-from datetime import date, timedelta
 from playwright.sync_api import sync_playwright
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [PROBE] %(message)s')
 log = logging.getLogger()
 
-TCC_BASE = "https://www.tccsearch.org"
-TCC_SEARCH = f"{TCC_BASE}/RealEstate/SearchEntry.aspx"
 PS_BASE = "https://travis.tx.publicsearch.us"
-
 UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
-
 ART_DIR = 'probe_artifacts'
-TODAY = date.today()
 
 
 def dump_body_text(page, label, n=60):
@@ -62,7 +56,7 @@ def dump_table(page, label):
         const rows = [];
         const t = document.querySelector('table');
         if (t) {
-            for (const tr of Array.from(t.querySelectorAll('tr')).slice(0, 6)) {
+            for (const tr of Array.from(t.querySelectorAll('tr')).slice(0, 8)) {
                 rows.push(Array.from(tr.querySelectorAll('th,td')).map(c => (c.textContent||'').trim()));
             }
         }
@@ -74,150 +68,94 @@ def dump_table(page, label):
     return info
 
 
-# ── PART 1: tccsearch.org diagnostics ───────────────────────────────────────
-
-def probe_tccsearch_requests():
-    import requests
-    for url in (TCC_BASE + '/', TCC_SEARCH):
-        try:
-            log.info(f"[requests] GET {url}")
-            r = requests.get(url, headers={
-                'User-Agent': UA,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-            }, timeout=45, allow_redirects=True)
-            log.info(f"[requests] {url} -> status={r.status_code} finalURL={r.url} "
-                     f"elapsed={r.elapsed.total_seconds():.1f}s bytes={len(r.content)}")
-            log.info(f"[requests] headers={dict(r.headers)}")
-            log.info(f"[requests] body[:500]={r.text[:500]!r}")
-        except Exception as e:
-            log.error(f"[requests] {url} FAILED: {type(e).__name__}: {e}")
-
-
-def probe_tccsearch_playwright(pw):
-    browser = pw.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-    ctx = browser.new_context(user_agent=UA, viewport={'width': 1400, 'height': 1900})
-    page = ctx.new_page()
-    page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
-    page.set_default_timeout(45_000)
-
-    for label, url in (('tcc root', TCC_BASE + '/'), ('tcc search', TCC_SEARCH)):
-        try:
-            log.info(f"[pw] GOTO {url} (wait_until=domcontentloaded, timeout=45s)")
-            resp = page.goto(url, wait_until='domcontentloaded', timeout=45_000)
-            log.info(f"[pw] {label}: status={resp.status if resp else '?'} "
-                     f"finalURL={page.url} title={page.title()!r}")
-            if resp:
-                log.info(f"[pw] {label}: response headers={dict(resp.headers)}")
-            page.wait_for_timeout(1500)
-            os.makedirs(ART_DIR, exist_ok=True)
-            fname = f"{ART_DIR}/{label.replace(' ', '_')}.png"
-            page.screenshot(path=fname, full_page=True)
-            dump_body_text(page, label, n=40)
-        except Exception as e:
-            log.error(f"[pw] {label} FAILED: {type(e).__name__}: {e}")
-            try:
-                page.screenshot(path=f"{ART_DIR}/{label.replace(' ', '_')}_FAILED.png")
-            except Exception:
-                pass
-
-    browser.close()
-
-
-# ── PART 2: travis.tx.publicsearch.us deep dive ─────────────────────────────
-
-def probe_publicsearch(pw):
-    browser = pw.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-    ctx = browser.new_context(user_agent=UA, viewport={'width': 1400, 'height': 1900})
-    page = ctx.new_page()
-    page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
-    page.set_default_timeout(30_000)
-
-    # 1. Load quick search (known-good) and enumerate the REAL department dropdown.
-    try:
-        log.info(f"GOTO {PS_BASE}")
-        page.goto(PS_BASE, wait_until='networkidle')
-        page.wait_for_timeout(1200)
-        # Dismiss the "Not sure where to start?" tour popup if present so it
-        # doesn't block clicks.
-        try:
-            page.locator('button:has-text("Take the Tour")').first
-            close_btn = page.locator('[aria-label="Close"], button:has(svg)').first
-        except Exception:
-            pass
-
-        # Find the department field/combobox and click it to open options.
-        dept_field = page.get_by_text('Land Records', exact=False).first
-        log.info(f"dept_field count={dept_field.count() if dept_field else 'n/a'}")
-        dept_field.click(timeout=5000)
-        page.wait_for_timeout(800)
-        page.screenshot(path=f'{ART_DIR}/dept_dropdown_open.png', full_page=True)
-
-        opts = page.evaluate("""() => {
-            // Try common option-list patterns: role=listbox/option, <li>, <ul>.
-            const out = [];
-            document.querySelectorAll('[role="option"], li[role], ul li').forEach(el => {
-                const t = (el.textContent||'').trim();
-                if (t) out.push(t);
-            });
-            return out;
-        }""")
-        log.info(f"ps travis: department dropdown options (generic scrape): {opts}")
-
-        # Also dump ALL visible text on the page while the dropdown is open --
-        # a robust fallback if the option markup doesn't match the selectors above.
-        dump_body_text(page, 'ps travis (dropdown open)', n=60)
-    except Exception as e:
-        log.error(f"department dropdown probe failed: {e}", exc_info=True)
-
-    # 2. Direct results-URL tests -- bypass the broken /search/advanced form
-    #    entirely, mirroring the pattern that works for the other 5 counties.
-    start = (TODAY - timedelta(days=60)).strftime('%Y%m%d')
-    end = TODAY.strftime('%Y%m%d')
-    for dept_code in ('FC', 'LR', 'NOS', 'FORECLOSURE'):
-        url = f"{PS_BASE}/results?department={dept_code}&recordedDateRange={start},{end}&searchType=advancedSearch"
-        try:
-            log.info(f"GOTO {url}")
-            resp = page.goto(url, wait_until='networkidle', timeout=30_000)
-            page.wait_for_timeout(2500)
-            log.info(f"ps travis results[{dept_code}]: status={resp.status if resp else '?'} "
-                     f"finalURL={page.url} title={page.title()!r}")
-            page.screenshot(path=f'{ART_DIR}/results_{dept_code}.png', full_page=True)
-            info = dump_table(page, f'ps travis results[{dept_code}]')
-            if not info['tables']:
-                dump_body_text(page, f'ps travis results[{dept_code}] (no table)', n=40)
-        except Exception as e:
-            log.error(f"results[{dept_code}] FAILED: {type(e).__name__}: {e}")
-
-    # 3. Click-through "Advanced Search" tab from the quick-search page (real
-    #    in-app navigation) instead of a hard page.goto -- in case the SPA
-    #    route only works via client-side routing.
-    try:
-        log.info(f"GOTO {PS_BASE} (for click-through advanced search)")
-        page.goto(PS_BASE, wait_until='networkidle')
-        page.wait_for_timeout(1000)
-        adv_link = page.get_by_text('Advanced Search', exact=False).first
-        adv_link.click(timeout=5000)
-        page.wait_for_timeout(2000)
-        log.info(f"ps travis: after clicking Advanced Search -> url={page.url} title={page.title()!r}")
-        page.screenshot(path=f'{ART_DIR}/advanced_clickthrough.png', full_page=True)
-        dump_body_text(page, 'ps travis advanced (click-through)', n=50)
-    except Exception as e:
-        log.error(f"advanced search click-through FAILED: {type(e).__name__}: {e}")
-
-    browser.close()
+def dump_listbox_options(page):
+    return page.evaluate("""() => {
+        const out = [];
+        document.querySelectorAll('[role="option"]').forEach(el => {
+            const t = (el.textContent||'').trim();
+            if (t) out.push(t);
+        });
+        return out;
+    }""")
 
 
 def main():
     os.makedirs(ART_DIR, exist_ok=True)
-    log.info("########## PART 1a: tccsearch.org (plain requests) ##########")
-    probe_tccsearch_requests()
-
     with sync_playwright() as pw:
-        log.info("########## PART 1b: tccsearch.org (Playwright) ##########")
-        probe_tccsearch_playwright(pw)
-        log.info("########## PART 2: travis.tx.publicsearch.us ##########")
-        probe_publicsearch(pw)
+        browser = pw.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+        ctx = browser.new_context(user_agent=UA, viewport={'width': 1500, 'height': 1900})
+        page = ctx.new_page()
+        page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+        page.set_default_timeout(30_000)
+
+        log.info(f"GOTO {PS_BASE}")
+        page.goto(PS_BASE, wait_until='networkidle')
+        page.wait_for_timeout(1200)
+
+        # 1. Open the Department combobox and select "Foreclosures".
+        try:
+            dept_field = page.get_by_text('Land Records', exact=False).first
+            dept_field.click(timeout=5000)
+            page.wait_for_timeout(600)
+            opts = dump_listbox_options(page)
+            log.info(f"department options (role=option scrape): {opts}")
+            page.get_by_role('option', name='Foreclosures', exact=True).click(timeout=5000)
+            page.wait_for_timeout(1000)
+            page.screenshot(path=f'{ART_DIR}/01_dept_foreclosures_selected.png', full_page=True)
+            dump_body_text(page, 'after selecting Foreclosures', n=30)
+        except Exception as e:
+            log.error(f"department selection failed: {e}", exc_info=True)
+            page.screenshot(path=f'{ART_DIR}/01_dept_FAILED.png', full_page=True)
+
+        # 2. Open the Date Range control and pick the broadest preset.
+        try:
+            date_field = page.get_by_text('Recorded Date', exact=False).first
+            date_field.click(timeout=5000)
+            page.wait_for_timeout(600)
+            opts = dump_listbox_options(page)
+            log.info(f"date range options (role=option scrape): {opts}")
+            page.screenshot(path=f'{ART_DIR}/02_date_dropdown_open.png', full_page=True)
+            # Prefer the broadest window so we maximize the chance of hitting
+            # real data on the first real attempt.
+            clicked = False
+            for label in ('Last 1 Year', 'Last 6 Months', 'Last 3 Months'):
+                try:
+                    page.get_by_role('option', name=label, exact=True).click(timeout=2000)
+                    log.info(f"selected date range preset: {label}")
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+            if not clicked:
+                log.warning("no date range preset matched -- leaving default")
+            page.wait_for_timeout(800)
+        except Exception as e:
+            log.error(f"date range selection failed: {e}", exc_info=True)
+            page.screenshot(path=f'{ART_DIR}/02_date_FAILED.png', full_page=True)
+
+        page.screenshot(path=f'{ART_DIR}/03_before_search.png', full_page=True)
+        dump_body_text(page, 'before clicking Search', n=30)
+
+        # 3. Click Search and see what we get.
+        try:
+            search_btn = page.get_by_role('button', name='Search', exact=False).first
+            search_btn.click(timeout=5000)
+            # Poll for navigation / results rather than a fixed sleep.
+            page.wait_for_timeout(4000)
+            try:
+                page.wait_for_load_state('networkidle', timeout=15_000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
+            log.info(f"AFTER SEARCH: url={page.url} title={page.title()!r}")
+            page.screenshot(path=f'{ART_DIR}/04_after_search.png', full_page=True)
+            dump_table(page, 'after search')
+            dump_body_text(page, 'after search (full)', n=80)
+        except Exception as e:
+            log.error(f"search click failed: {e}", exc_info=True)
+            page.screenshot(path=f'{ART_DIR}/04_search_FAILED.png', full_page=True)
+
+        browser.close()
 
 
 if __name__ == '__main__':
