@@ -254,13 +254,28 @@ _BLOCKLIST_STREETS = [
 ]
 
 
+# Same substring-containment bug as base.py's is_residential_lead() /
+# looks_like_person() above, here on ADDRESS text: unguarded `num in s`
+# matches inside a longer house number too -- e.g. '1000' inside '11000' --
+# and 'guadalupe' (a common Austin street-name component) would then also
+# match a real, unrelated street like "11000 Guadalupe Trail", wrongly
+# blocklisting a genuine homeowner's address as the courthouse's. Since
+# main.py drops any record with no address, this could silently discard an
+# otherwise-good lead, not just mis-tag one field. \b-anchor both the number
+# and the street-name token so each only matches as a whole token.
+_BLOCKLIST_PATTERNS = [
+    (re.compile(r'\b' + re.escape(num) + r'\b'), re.compile(r'\b' + re.escape(name) + r'\b'))
+    for num, name in _BLOCKLIST_STREETS
+]
+
+
 def is_nonproperty_address(street: str) -> bool:
     s = (street or '').lower()
     if not s:
         return False
     if re.search(r'\b(suite|ste)\b', s):     # commercial/office, not a homeowner
         return True
-    return any(num in s and name in s for num, name in _BLOCKLIST_STREETS)
+    return any(np.search(s) and nmp.search(s) for np, nmp in _BLOCKLIST_PATTERNS)
 
 
 def address_and_owner_from_png(body):
