@@ -83,14 +83,19 @@ guess this, it silently truncates):
   visible numbered buttons (e.g. 1,2,3,4,5,6,...,28,29) is a fixed/decorative
   window -- clicking the "..." does nothing and it does NOT slide to expose
   middle pages -- so the only reliable way to reach every page is to click
-  "Next page" repeatedly. We confirm each click actually landed on the
-  expected page by reading the "Current page N" label (ground truth),
-  NOT by diffing displayed content -- a probe run showed the very FIRST
-  "Next page" click after initial load can take up to ~15s (a one-time
-  server/SignalR warm-up cost), while every subsequent click was ~0.2-0.3s.
-  A generous per-click timeout plus one retry (matching the guide's
-  "re-check once before trusting" guidance) absorbs that without either
-  false "end of results" or actually truncating.
+  "Next page" repeatedly. We confirm each click by reading the "Current
+  page N" label (ground truth), NOT by diffing displayed content -- a real
+  production run showed the very FIRST "Next page" click after initial load
+  can take up to ~15-25s (a one-time server/SignalR warm-up cost), while
+  every subsequent click was ~0.2-0.3s. A generous per-click timeout plus
+  one retry (matching the guide's "re-check once before trusting" guidance)
+  absorbed that cleanly in that run. As a further hardening on top of that
+  (see `_click_next`'s docstring), if a slow click's response ever lands
+  late enough to overshoot past the expected next page, we continue from
+  wherever we verifiably landed (logging which page(s) may have been
+  skipped) rather than treating anything short of an exact +1 as a fatal
+  "pagination stalled" -- a bounded, visible degradation instead of
+  abandoning the rest of the scrape over one timing race.
 """
 import re
 import time
