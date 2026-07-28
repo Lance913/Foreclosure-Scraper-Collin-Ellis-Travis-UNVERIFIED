@@ -99,6 +99,16 @@ JUNK_TOKENS = {
 }
 NAME_SUFFIXES = {'JR', 'SR', 'II', 'III', 'IV', 'V'}
 
+# Same class of bug as base.py's is_residential_lead() (see scrapers/base.py
+# for the full writeup): plain substring containment against NON_OWNER_TOKENS
+# is unguarded and matches inside real surnames -- e.g. 'LP' inside "ALPERT",
+# 'HOA' inside "HOAG", 'INC' inside "VINCENT" -- which would make
+# looks_like_person() wrongly reject a genuine OCR'd owner name. \b-anchor
+# each token so it only matches as a whole token, not a fragment.
+_NON_OWNER_PATTERNS = [
+    re.compile(r'\b' + re.escape(t) + r'\b') for t in NON_OWNER_TOKENS
+]
+
 
 def _has_vowel(w):
     return any(c in 'AEIOUaeiouY' for c in w)
@@ -106,7 +116,7 @@ def _has_vowel(w):
 
 def looks_like_person(name):
     up = name.upper()
-    if any(t in up for t in NON_OWNER_TOKENS):
+    if any(p.search(up) for p in _NON_OWNER_PATTERNS):
         return False
     words = name.split()
     if not (2 <= len(words) <= 5):
