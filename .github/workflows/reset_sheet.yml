@@ -7,18 +7,9 @@ on:
         description: 'Type RESET (all caps) to wipe the Foreclosure Leads + Foreclosure Daily Counts tabs'
         required: true
         default: ''
-      probe:
-        description: >-
-          [TEMPORARY -- investigation only, removed before merge] Type
-          PROBE_COLLIN to run probe_collin.py instead of a reset (piggybacks
-          on this already-registered workflow so it can be dispatched on a
-          feature branch without touching main; see SYSTEM_GUIDE.md Sec.6).
-        required: false
-        default: ''
 
 jobs:
   reset:
-    if: ${{ github.event.inputs.probe != 'PROBE_COLLIN' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,38 +33,3 @@ jobs:
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: python main.py --reset-sheet
-
-  # TEMPORARY -- Collin portal investigation job. Piggybacks on this already
-  # -registered (on main) workflow so `gh workflow run` can dispatch it on a
-  # feature branch (GitHub only allows dispatching workflow FILES that exist
-  # on the default branch, even when targeting another ref for execution).
-  # Removed once the real scrapers/collin.py is written -- see SYSTEM_GUIDE.md
-  # Sec.6/Sec.7.
-  probe_collin:
-    if: ${{ github.event.inputs.probe == 'PROBE_COLLIN' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install Python deps
-        run: pip install playwright beautifulsoup4 lxml
-
-      - name: Install Chromium
-        run: playwright install chromium --with-deps
-
-      - name: Run probe
-        run: python probe_collin.py
-
-      - name: Upload probe artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: collin-probe-artifacts
-          path: probe_artifacts/
-          if-no-files-found: warn

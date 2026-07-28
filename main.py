@@ -25,8 +25,8 @@ from datetime import date, datetime
 from typing import List, Dict
 
 from scrapers import (
-    # Add each county's scraper class here as it's built, e.g.:
-    # CollinCountyScraper,
+    CollinCountyScraper,
+    # Add each remaining county's scraper class here as it's built, e.g.:
     # EllisCountyScraper,
     # TravisCountyScraper,
 )
@@ -41,13 +41,13 @@ logger = logging.getLogger('main')
 
 # Add each county's slug here as its scraper is completed and merged.
 ALL_COUNTIES = [
-    # 'collin',
+    'collin',
     # 'ellis',
     # 'travis',
 ]
 
 SCRAPER_MAP = {
-    # 'collin': CollinCountyScraper,
+    'collin': CollinCountyScraper,
     # 'ellis':  EllisCountyScraper,
     # 'travis': TravisCountyScraper,
 }
