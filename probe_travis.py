@@ -1,33 +1,34 @@
 """
-Probe v6 -- Travis County: fix date-range field (label changes on dept select).
+Probe v7 -- exercise the REAL TravisCountyScraper._reach_results_page(),
+then go one step further: parse the results table with the actual
+publicsearch row-parser, open the first document, and OCR it if an image
+shows up -- all in one run to maximize information per (currently
+rate-limited-by-GH-billing) iteration.
 
-v5 result: Department selection to "Foreclosures" via click-text + ArrowDown
-x3 + Enter WORKED ("dept now shows 'Foreclosures' in body text: True").
+Written while GitHub Actions runs were blocked by an account-wide billing
+issue (unrelated to this code) -- unconfirmed until the next real run:
+  - Whether the Sale Date range control behaves like the Department combobox
+    (ArrowDown + Enter) or is a different widget (e.g. a raw date picker).
+  - The real results table schema for Travis's Foreclosures department.
+  - Whether owner name needs OCR (expected, per the platform's established
+    pattern for the other 5 counties -- "Parties: No parties found" on the
+    doc summary) -- or whether Travis indexes it differently.
 
-CRITICAL finding: once Foreclosures is selected, the Date Range field's
-label CHANGES from "Recorded Date" to **"Sale Date"** (confirmed in the body
-text dump: "Date Range | Sale Date"). The Foreclosures department filters by
-auction date, not filing/recorded date -- which is actually exactly what we
-want (upcoming trustee sale auctions). v5's date-range step failed because
-it was still looking for text "Recorded Date", which no longer exists on
-the page at that point -- a pure locator bug, not a portal problem.
-
-v6 fix: click text "Sale Date" (falling back to "Recorded Date" just in
-case) to open the date-range control post department-select, dump whatever
-preset options it offers (may differ from the Recorded Date list -- a
-forward-looking Sale Date filter might have different/no "Last N" presets),
-then select the broadest one and submit.
+This imports the ACTUAL scrapers/counties.py + scrapers/publicsearch.py code
+(not a duplicate ad-hoc script), so a successful run here means the real
+scraper is already validated, not just the probe.
 """
+import io
 import logging
 import os
-from playwright.sync_api import sync_playwright
+import sys
+from datetime import date
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [PROBE] %(message)s')
-log = logging.getLogger()
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-PS_BASE = "https://travis.tx.publicsearch.us"
-UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-      '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(levelname)s: %(message)s')
+log = logging.getLogger('PROBE')
+
 ART_DIR = 'probe_artifacts'
 
 
@@ -38,7 +39,7 @@ def shot(page, name):
         log.warning(f"screenshot {name} failed: {e}")
 
 
-def dump_body_text(page, label, n=60):
+def dump_body_text(page, label, n=80):
     txt = page.evaluate("() => document.body.innerText || ''")
     lines = [l.strip() for l in txt.split('\n') if l.strip()]
     log.info(f"=== {label}: body text ({len(lines)} lines, showing first {n}) ===")
@@ -47,138 +48,116 @@ def dump_body_text(page, label, n=60):
     return lines
 
 
-def dump_table(page, label):
-    info = page.evaluate("""() => {
-        const tables = Array.from(document.querySelectorAll('table')).map(t => ({
-            headers: Array.from(t.querySelectorAll('th')).map(h => (h.textContent||'').trim()),
-            rowCount: t.querySelectorAll('tr').length,
-        }));
-        const rows = [];
-        const t = document.querySelector('table');
-        if (t) {
-            for (const tr of Array.from(t.querySelectorAll('tr')).slice(0, 10)) {
-                rows.push(Array.from(tr.querySelectorAll('th,td')).map(c => (c.textContent||'').trim()));
-            }
-        }
-        return {tables, rows};
-    }""")
-    log.info(f"=== {label}: tables={info['tables']} ===")
-    for r in info['rows']:
-        log.info(f"  ROW: {r}")
-    return info
-
-
-def dismiss_popups(page):
-    try:
-        page.keyboard.press('Escape')
-        page.wait_for_timeout(300)
-    except Exception:
-        pass
-    for sel in ['[aria-label="Close"]', 'button:has-text("×")', 'button:has-text("✕")',
-                'button[class*="close" i]', '[class*="modal" i] button', '[class*="popup" i] button',
-                '[class*="tour" i] button']:
-        try:
-            loc = page.locator(sel)
-            if loc.count() > 0 and loc.first.is_visible():
-                loc.first.click(timeout=1500)
-                log.info(f"dismissed popup via selector: {sel}")
-                page.wait_for_timeout(400)
-        except Exception:
-            pass
-    try:
-        page.mouse.click(5, 5)
-    except Exception:
-        pass
-
-
 def main():
     os.makedirs(ART_DIR, exist_ok=True)
+    from playwright.sync_api import sync_playwright
+    from scrapers.counties import TravisCountyScraper
+    from scrapers.publicsearch import _PARSE_ROWS_JS, launch_chromium
+
+    target_date = date.today()
+    scraper = TravisCountyScraper()
+    log.info(f"TravisCountyScraper: base_url={scraper.base_url}")
+
+    captured_images = []
+
+    def is_doc_image(u: str) -> bool:
+        return '/files/documents/' in u and '/images/' in u and '.png' in u
+
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-        ctx = browser.new_context(user_agent=UA, viewport={'width': 1500, 'height': 1900})
-        page = ctx.new_page()
+        browser = launch_chromium(pw)
+        context = browser.new_context(user_agent=(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        ))
+        page = context.new_page()
         page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         page.set_default_timeout(30_000)
+        page.on('response', lambda r: captured_images.append(r.url) if is_doc_image(r.url) else None)
 
-        log.info(f"GOTO {PS_BASE}")
-        page.goto(PS_BASE, wait_until='networkidle')
-        page.wait_for_timeout(1200)
-        dismiss_popups(page)
-        page.wait_for_timeout(500)
-        shot(page, '00_clean')
-
-        # 1. Department -> Foreclosures via click-to-open + keyboard select.
+        # 1. Drive the REAL _reach_results_page() implementation.
         try:
-            page.get_by_text('Land Records', exact=True).first.click(timeout=6000)
-            page.wait_for_timeout(600)
-            shot(page, '01_dept_open')
-            opts = page.evaluate("""() => Array.from(document.querySelectorAll('[role="option"]'))
-                .map(el => (el.textContent||'').trim()).filter(Boolean)""")
-            log.info(f"dept options visible: {opts}")
-            for _ in range(3):
-                page.keyboard.press('ArrowDown')
-                page.wait_for_timeout(150)
-            page.keyboard.press('Enter')
-            page.wait_for_timeout(1000)
-            shot(page, '02_dept_selected')
-            lines = dump_body_text(page, 'after dept keyboard-select', n=15)
-            log.info(f"dept now shows 'Foreclosures' in body text: {'Foreclosures' in lines}")
+            scraper._reach_results_page(page, target_date)
+            shot(page, '01_reach_results_page_done')
         except Exception as e:
-            log.error(f"department selection failed: {e}", exc_info=True)
-            shot(page, '02_dept_FAILED')
+            log.error(f"_reach_results_page FAILED: {type(e).__name__}: {e}", exc_info=True)
+            shot(page, '01_reach_results_page_FAILED')
+            dump_body_text(page, 'state after failure', n=60)
+            browser.close()
+            return
 
-        # 2. Date range -> broadest preset via click-to-open + keyboard select.
-        #    NOTE: the field's label changes to "Sale Date" once the
-        #    Foreclosures department is selected (was "Recorded Date" under
-        #    Land Records) -- try the new label first, fall back to the old.
+        # 2. Parse with the REAL row parser (matches columns by header name).
         try:
+            rows = page.evaluate(_PARSE_ROWS_JS)
+            log.info(f"REAL PARSER: {len(rows)} rows parsed")
+            for r in rows[:15]:
+                log.info(f"  ROW: {r}")
+        except Exception as e:
+            log.error(f"row parser failed: {e}")
+            rows = []
+
+        # 2b. Also dump raw table headers/cells as a cross-check, in case the
+        #     named-column matching in _PARSE_ROWS_JS doesn't find Travis's
+        #     actual header text (would show blank fields above).
+        raw = page.evaluate("""() => {
+            const t = document.querySelector('table');
+            if (!t) return {headers: [], rowCount: 0, sample: []};
+            const headers = Array.from(t.querySelectorAll('th')).map(h => (h.textContent||'').trim());
+            const sample = [];
+            for (const tr of Array.from(t.querySelectorAll('tr')).slice(0, 6)) {
+                sample.push(Array.from(tr.querySelectorAll('th,td')).map(c => (c.textContent||'').trim()));
+            }
+            return {headers, rowCount: t.querySelectorAll('tr').length, sample};
+        }""")
+        log.info(f"RAW TABLE: headers={raw['headers']} rowCount={raw['rowCount']}")
+        for r in raw['sample']:
+            log.info(f"  RAW ROW: {r}")
+        if not raw['headers']:
+            dump_body_text(page, 'no table found', n=60)
+
+        # 3. If we got rows, open the first doc and see what a detail page
+        #    looks like -- specifically whether party names are indexed
+        #    (would mean OCR isn't needed) or "No parties found" (OCR needed,
+        #    matching the established pattern for this platform).
+        if rows and rows[0].get('doc_id'):
+            doc_id = rows[0]['doc_id']
+            log.info(f"Opening first doc: doc_id={doc_id}")
             try:
-                date_trigger = page.get_by_text('Sale Date', exact=True).first
-                date_trigger.click(timeout=4000)
-                log.info("opened date-range control via 'Sale Date' label")
-            except Exception:
-                date_trigger = page.get_by_text('Recorded Date', exact=True).first
-                date_trigger.click(timeout=4000)
-                log.info("opened date-range control via 'Recorded Date' label (fallback)")
-            page.wait_for_timeout(600)
-            shot(page, '03_date_open')
-            opts = page.evaluate("""() => Array.from(document.querySelectorAll('[role="option"]'))
-                .map(el => (el.textContent||'').trim()).filter(Boolean)""")
-            log.info(f"date options visible: {opts}")
-            # Press ArrowDown generously (more than the option count) to land
-            # on the LAST (broadest) option regardless of exact indexing --
-            # most listbox widgets clamp at the last item rather than wrap.
-            for _ in range(10):
-                page.keyboard.press('ArrowDown')
-                page.wait_for_timeout(100)
-            page.keyboard.press('Enter')
-            page.wait_for_timeout(1000)
-            shot(page, '04_date_selected')
-            dump_body_text(page, 'after date keyboard-select', n=15)
-        except Exception as e:
-            log.error(f"date range selection failed: {e}", exc_info=True)
-            shot(page, '04_date_FAILED')
+                captured_images.clear()
+                page.goto(f"{scraper.base_url}/doc/{doc_id}", wait_until='domcontentloaded')
+                page.wait_for_timeout(3000)
+                shot(page, '02_first_doc')
+                dump_body_text(page, 'doc detail page', n=60)
 
-        dump_body_text(page, 'before clicking Search', n=20)
+                # Wait a bit more for the page-1 image to show up over the network.
+                for _ in range(20):
+                    if any(is_doc_image(u) for u in captured_images):
+                        break
+                    page.wait_for_timeout(300)
+                png_url = next((u for u in captured_images if is_doc_image(u)), None)
+                log.info(f"doc image captured: {png_url}")
 
-        # 3. Search.
-        try:
-            search_btn = page.locator('button:has-text("Search")').first
-            search_btn.click(timeout=8000)
-            page.wait_for_timeout(4000)
-            try:
-                page.wait_for_load_state('networkidle', timeout=15_000)
-            except Exception:
-                pass
-            page.wait_for_timeout(1500)
-            log.info(f"AFTER SEARCH: url={page.url} title={page.title()!r}")
-            shot(page, '05_after_search')
-            dump_table(page, 'after search')
-            dump_body_text(page, 'after search (full)', n=100)
-        except Exception as e:
-            log.error(f"search click failed: {e}", exc_info=True)
-            shot(page, '05_search_FAILED')
-            dump_body_text(page, 'after search FAILED state', n=60)
+                if png_url:
+                    body = context.request.get(png_url).body()
+                    log.info(f"downloaded doc image: {len(body)} bytes")
+                    with open(f'{ART_DIR}/first_doc_page1.png', 'wb') as f:
+                        f.write(body)
+                    try:
+                        import pytesseract
+                        from PIL import Image
+                        txt = pytesseract.image_to_string(Image.open(io.BytesIO(body)))
+                        log.info(f"=== RAW OCR TEXT (first doc, page 1) ===")
+                        for ln in txt.split('\n'):
+                            if ln.strip():
+                                log.info(f"  OCR| {ln.strip()}")
+                    except ImportError:
+                        log.warning("pytesseract/PIL not installed in this probe run -- skipping OCR")
+                    except Exception as e:
+                        log.error(f"OCR failed: {e}")
+            except Exception as e:
+                log.error(f"doc detail probe failed: {e}", exc_info=True)
+                shot(page, '02_first_doc_FAILED')
+        else:
+            log.info("No rows with a doc_id -- skipping document detail probe.")
 
         browser.close()
 
