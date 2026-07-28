@@ -1,27 +1,22 @@
 """
-Probe v5 -- Travis County: keyboard-driven combobox selection.
+Probe v6 -- Travis County: fix date-range field (label changes on dept select).
 
-v4 findings (confirmed via screenshots):
-  - Popup dismissal WORKS (00_baseline shows the "Take the Tour" popup;
-    01_after_dismiss is clean).
-  - The Department combobox's real interactive element is an <input
-    role="combobox" aria-label="Change department"> with a 0x0 bounding box
-    -- not directly clickable by Playwright (fails the visibility check and
-    times out). The VISIBLE box showing "Land Records" + chevron is a
-    styled wrapper. Clicking by visible TEXT worked fine in v1-v3 (options
-    appeared) -- the failure was almost certainly in the OPTION SELECTION
-    step (role=option name=X exact=True), not the opening.
-  - The aria live-region text explicitly confirms keyboard support: "Use Up
-    and Down to choose options, press Enter to select the currently focused
-    option" -- so drive it via keyboard instead of trying to click
-    individual option elements (sidesteps all visibility/overlap issues).
+v5 result: Department selection to "Foreclosures" via click-text + ArrowDown
+x3 + Enter WORKED ("dept now shows 'Foreclosures' in body text: True").
 
-v5 approach: click the VISIBLE TEXT to open each combobox (proven to work),
-then use ArrowDown + Enter (keyboard) to select, instead of clicking option
-elements directly. Confirmed order: department = [Land Records, Assumed
-Names, Marriage, Foreclosures]; date range = [Recorded Date(placeholder),
-Last 24 Hours, Last 3 Days, Last 1 Week, Last 2 Weeks, Last 1 Month, Last 3
-Months, Last 6 Months, Last 1 Year].
+CRITICAL finding: once Foreclosures is selected, the Date Range field's
+label CHANGES from "Recorded Date" to **"Sale Date"** (confirmed in the body
+text dump: "Date Range | Sale Date"). The Foreclosures department filters by
+auction date, not filing/recorded date -- which is actually exactly what we
+want (upcoming trustee sale auctions). v5's date-range step failed because
+it was still looking for text "Recorded Date", which no longer exists on
+the page at that point -- a pure locator bug, not a portal problem.
+
+v6 fix: click text "Sale Date" (falling back to "Recorded Date" just in
+case) to open the date-range control post department-select, dump whatever
+preset options it offers (may differ from the Recorded Date list -- a
+forward-looking Sale Date filter might have different/no "Last N" presets),
+then select the broadest one and submit.
 """
 import logging
 import os
@@ -133,9 +128,18 @@ def main():
             shot(page, '02_dept_FAILED')
 
         # 2. Date range -> broadest preset via click-to-open + keyboard select.
+        #    NOTE: the field's label changes to "Sale Date" once the
+        #    Foreclosures department is selected (was "Recorded Date" under
+        #    Land Records) -- try the new label first, fall back to the old.
         try:
-            date_trigger = page.get_by_text('Recorded Date', exact=True).first
-            date_trigger.click(timeout=6000)
+            try:
+                date_trigger = page.get_by_text('Sale Date', exact=True).first
+                date_trigger.click(timeout=4000)
+                log.info("opened date-range control via 'Sale Date' label")
+            except Exception:
+                date_trigger = page.get_by_text('Recorded Date', exact=True).first
+                date_trigger.click(timeout=4000)
+                log.info("opened date-range control via 'Recorded Date' label (fallback)")
             page.wait_for_timeout(600)
             shot(page, '03_date_open')
             opts = page.evaluate("""() => Array.from(document.querySelectorAll('[role="option"]'))
