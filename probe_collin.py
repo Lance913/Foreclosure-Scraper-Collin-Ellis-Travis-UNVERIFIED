@@ -1,24 +1,39 @@
 """
-Probe v6 -- Collin County Foreclosure Notices portal.
+Probe v7 -- Collin County Foreclosure Notices portal -- PAGINATION mechanics.
 
-v5 crashed: `page.goto(..., wait_until='networkidle')` timed out (45s) on the
-very first navigation. The page embeds a Leaflet/ArcGIS map that keeps
-fetching tiles, so network activity may never go idle -- 'networkidle' is
-the wrong wait condition here (this is exactly SYSTEM_GUIDE.md Sec.9 bug #1
-territory: a bad wait condition silently costing us the whole probe). Fix:
-navigate with 'domcontentloaded' and poll for real content (the string
-"Property Type:" appearing in body text) instead. Also: do ONE navigation
-for the whole probe (use the in-app "Reset Filters" button between
-experiments, not repeated page.goto), and wrap every section in try/except
-so one flaky step doesn't kill everything else.
+Everything else is now understood (see probe v1-v6 history in git log):
+  - Real URL: https://apps2.collincountytx.gov/ForeclosureNotices (Blazor
+    Server + MudBlazor; NOT query-param driven -- must drive the live UI).
+  - Card = one <tr> whose single <td class="mud-table-cell..."> holds the
+    address <p> + a grid of labeled fields: City:, Sale Date:, File Date:,
+    Property Type:. No owner name / doc id anywhere (verified via a properly
+    -isolated single-card click -- no change). No CSV/export affordance.
+  - Full Property Type facet list (exact wording + current counts):
+      Commercial (C3) [2], Commercial (F1) [17], Residential Duplex (B2) [1],
+      Residential Mobile Home (A2) [2], Residential Single Family (A1) [352],
+      Residential Single Family (C1) [1], Residential Townhomes (A4) [18]
+    Sum = 393, matching the "All Properties Types [393/393]" facet -- the
+    other ~319 of 712 total records have NO property type classified.
+    Decision: filter Property Type IN CODE (substring match against a small
+    allow-list), not via the fragile UI popover -- simpler and more robust;
+    scrape all pages regardless of type.
+  - Page Size options: 5 / 10 / 25 only (no bigger page size available).
+  - ~29 pages at size 25 for ~712 total unfiltered records.
 
-Goals still open from v4/v5 (v5 crashed before gathering anything new):
-  1. Isolate + click one real card -- does anything happen (owner name/doc id)?
-  2. Full, correctly-scoped Property Type filter option list (exact wording).
-  3. Page Size options.
-  4. Map marker click -> popup with more info?
-  5. Any export/download/CSV/print affordance.
-  6. Toggle to only 2 property types -- does the total count/page count drop?
+THIS IS THE ONE REMAINING UNKNOWN before writing the real scraper:
+pagination mechanics (SYSTEM_GUIDE.md Sec.9 bug #2 -- "pagination can
+silently truncate" -- explicitly do not guess this).
+
+Goals:
+  1. Dump the exact outerHTML of the pager control (button classes/aria/
+     structure) so we know a reliable selector for "next page".
+  2. Actually click from page 1 -> 2 -> 3, confirming real content changes
+     each time (compare first-card address), and log timing.
+  3. Check what happens once the visible page-number window needs to slide
+     (does a "..." exist and is it clickable, or is there a stable
+     next-page arrow icon we should use instead of numbered buttons).
+  4. Confirm the URL never changes across pages (so we know state truly
+     lives server-side and our scraper must stay on one page instance).
 """
 import logging
 import os
@@ -33,115 +48,50 @@ log = logging.getLogger()
 ARTIFACT_DIR = 'probe_artifacts'
 URL = "https://apps2.collincountytx.gov/ForeclosureNotices"
 
-ISOLATE_CARD_JS = """() => {
-    const all = Array.from(document.querySelectorAll('body *'));
-    const leaf = all.find(el => el.children.length === 0 && (el.textContent||'').includes('Property Type:'));
-    if (!leaf) return null;
-    let card = leaf, node = leaf;
-    for (let i = 0; i < 20 && node.parentElement; i++) {
-        const txt = node.parentElement.textContent || '';
-        const count = (txt.match(/Property Type:/g) || []).length;
-        if (count > 1) break;
-        card = node;
-        node = node.parentElement;
-    }
-    return {html: card.outerHTML, tag: card.tagName, cls: card.className};
-}"""
-
-MARK_CARD_JS = """() => {
-    const all = Array.from(document.querySelectorAll('body *'));
-    const leaf = all.find(el => el.children.length === 0 && (el.textContent||'').includes('Property Type:'));
-    if (!leaf) return false;
-    let card = leaf, node = leaf;
-    for (let i = 0; i < 20 && node.parentElement; i++) {
-        const txt = node.parentElement.textContent || '';
-        const count = (txt.match(/Property Type:/g) || []).length;
-        if (count > 1) break;
-        card = node;
-        node = node.parentElement;
-    }
-    card.setAttribute('data-probe-target', '1');
-    return {tag: card.tagName, cls: card.className, text: card.textContent.trim().slice(0, 200)};
-}"""
-
-ALL_TITLED_JS = """() => {
-    const all = Array.from(document.querySelectorAll('*'));
-    return all.map(el => ({
-        tag: el.tagName,
-        title: el.getAttribute('title'),
-        aria: el.getAttribute('aria-label'),
-        text: (el.textContent || '').trim().slice(0, 40),
-    })).filter(x => (x.title && /export|download|excel|csv|print/i.test(x.title)) ||
-                     (x.aria && /export|download|excel|csv|print/i.test(x.aria)));
-}"""
-
 
 def save(name, content):
     os.makedirs(ARTIFACT_DIR, exist_ok=True)
     name = re.sub(r'[<>:"|?*\r\n]', '_', name)
-    path = os.path.join(ARTIFACT_DIR, name)
-    with open(path, 'w') as f:
+    with open(os.path.join(ARTIFACT_DIR, name), 'w') as f:
         f.write(content)
-    log.info(f"  saved {path} ({len(content)} chars)")
+    log.info(f"  saved probe_artifacts/{name} ({len(content)} chars)")
 
 
 def wait_for_cards(page, timeout_ms=30000):
-    """Poll until real card content is present (avoids 'networkidle', which
-    never resolves because of the embedded map's continuous tile requests)."""
     deadline = time.monotonic() + timeout_ms / 1000
-    last_n = 0
     while time.monotonic() < deadline:
         try:
-            last_n = page.evaluate(
-                "() => (document.body.innerText.match(/Property Type:/g)||[]).length")
+            n = page.evaluate("() => (document.body.innerText.match(/Property Type:/g)||[]).length")
         except Exception:
-            last_n = 0
-        if last_n > 0:
-            return last_n
-        try:
-            no_results = page.evaluate(
-                "() => /no results|no records|nothing found/i.test(document.body.innerText||'')")
-        except Exception:
-            no_results = False
-        if no_results:
-            log.info("  page explicitly reports no results.")
-            return 0
-        page.wait_for_timeout(500)
-    log.warning(f"  cards never appeared within {timeout_ms/1000:.0f}s (last count={last_n}).")
-    return last_n
+            n = 0
+        if n > 0:
+            return n
+        page.wait_for_timeout(400)
+    return 0
 
 
-def dump_popover(page, label):
-    info = page.evaluate("""() => {
-        const pops = Array.from(document.querySelectorAll('.mud-popover, [class*="popover"]'));
-        return pops.map(p => ({
-            cls: p.className,
-            visible: p.offsetParent !== null,
-            items: Array.from(p.querySelectorAll('.mud-list-item, li, [role="option"], input[type=checkbox]')).map(i => ({
-                tag: i.tagName, text: (i.textContent||'').trim().slice(0,80),
-                type: i.type, checked: i.checked,
-            })),
-            textPreview: (p.textContent||'').trim().slice(0, 500),
-        }));
-    }""")
-    log.info(f"  POPOVERS after {label!r} click: {len(info)}")
-    for p in info:
-        if not p['visible']:
-            continue
-        log.info(f"    cls={p['cls']!r} visible={p['visible']} items={len(p['items'])}")
-        seen = set()
-        for it in p['items']:
-            key = it['text']
-            if key in seen or not key:
-                continue
-            seen.add(key)
-            log.info(f"      {it}")
-        if not p['items']:
-            log.info(f"      textPreview: {p['textPreview']!r}")
+def first_card_signature(page):
+    """First card's address line -- used to detect a real page change."""
+    try:
+        return page.evaluate("""() => {
+            const all = Array.from(document.querySelectorAll('td.mud-table-cell'));
+            return all.length ? all[0].textContent.trim().slice(0, 80) : '';
+        }""")
+    except Exception:
+        return ''
 
 
-def section(name):
-    log.info(f"\n########## SECTION: {name} ##########")
+def all_addresses(page):
+    try:
+        return page.evaluate("""() => {
+            const cells = Array.from(document.querySelectorAll('td.mud-table-cell'));
+            return cells.map(td => {
+                const p = td.querySelector('p.list-header, p');
+                return p ? p.textContent.replace(/\\s+/g,' ').trim() : '';
+            });
+        }""")
+    except Exception:
+        return []
 
 
 def main():
@@ -158,119 +108,118 @@ def main():
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         page.set_default_timeout(20000)
 
-        section("Initial load")
+        log.info("Loading page 1...")
         page.goto(URL, wait_until='domcontentloaded', timeout=45000)
-        n = wait_for_cards(page)
-        log.info(f"Cards ready: {n} 'Property Type:' occurrences found on load.")
+        wait_for_cards(page)
 
-        # ---- 1. Isolate one card properly ----
-        section("Isolate + inspect one card")
-        try:
-            card = page.evaluate(ISOLATE_CARD_JS)
-            if card:
-                log.info(f"ISOLATED CARD tag={card['tag']} cls={card['cls']!r}")
-                save('sample_card_v2.html', card['html'])
-                log.info(f"CARD HTML:\n{card['html']}")
-            else:
-                log.warning("Could not isolate a card.")
-        except Exception as e:
-            log.warning(f"Card isolation failed: {e}")
+        # ---- 1. Dump the pager control's exact HTML ----
+        pager_html = page.evaluate("""() => {
+            // Find a button whose text is exactly '2' (a page-number button),
+            // then walk up to its containing nav/pagination wrapper.
+            const btns = Array.from(document.querySelectorAll('button'));
+            const two = btns.find(b => (b.textContent||'').trim() === '2');
+            if (!two) return null;
+            let el = two;
+            for (let i = 0; i < 5 && el.parentElement; i++) el = el.parentElement;
+            return el.outerHTML;
+        }""")
+        if pager_html:
+            save('pager_control.html', pager_html)
+            log.info(f"PAGER HTML:\n{pager_html[:4000]}")
+        else:
+            log.warning("Could not find a page-'2' button to anchor the pager dump.")
 
-        # ---- 2. Click that one card, watch for changes ----
-        section("Click one card")
-        try:
-            marked = page.evaluate(MARK_CARD_JS)
-            log.info(f"Marked card for click: {marked}")
-            if marked:
-                before_text = page.evaluate("() => document.body.innerText || ''")
-                before_nodes = page.evaluate("() => document.querySelectorAll('*').length")
-                url_before = page.url
-                page.locator('[data-probe-target="1"]').first.click(timeout=8000, force=True)
-                page.wait_for_timeout(2500)
-                url_after = page.url
-                after_text = page.evaluate("() => document.body.innerText || ''")
-                after_nodes = page.evaluate("() => document.querySelectorAll('*').length")
-                log.info(f"CLICK CARD: url {url_before} -> {url_after}; "
-                         f"nodes {before_nodes} -> {after_nodes}; "
-                         f"text changed = {before_text != after_text}")
-                if before_text != after_text:
-                    save('after_card_click_body.txt', after_text)
-                    log.info(f"NEW BODY TEXT (first 3000):\n{after_text[:3000]}")
-        except Exception as e:
-            log.warning(f"Card click experiment failed: {e}")
+        # Dump every button's full attribute set within the pager area (aria-label,
+        # title, disabled, class) -- specifically the icon-only ones flanking the
+        # numbered buttons (candidates for a stable "next page" selector).
+        pager_buttons = page.evaluate("""() => {
+            const btns = Array.from(document.querySelectorAll('button'));
+            return btns.map((b,i) => ({
+                i, text: (b.textContent||'').trim(),
+                aria: b.getAttribute('aria-label'), title: b.getAttribute('title'),
+                disabled: b.disabled, cls: b.className,
+            }));
+        }""")
+        log.info(f"ALL BUTTONS ({len(pager_buttons)}) with aria/title/disabled:")
+        for b in pager_buttons:
+            log.info(f"  {b}")
 
-        # ---- 3. Property Type filter popover ----
-        section("Property Type filter popover")
-        try:
-            page.get_by_text('All Properties Types', exact=False).first.click(timeout=8000)
-            page.wait_for_timeout(1200)
-            dump_popover(page, 'Property Types')
-            page.keyboard.press('Escape')
-            page.wait_for_timeout(500)
-        except Exception as e:
-            log.warning(f"Property Type popover failed: {e}")
+        # ---- 2. Click page 1 -> 2 -> 3, confirm real content changes ----
+        url0 = page.url
+        sig1 = first_card_signature(page)
+        addrs1 = all_addresses(page)
+        log.info(f"PAGE 1: url={url0} first_card={sig1!r} n_addrs={len(addrs1)}")
+        log.info(f"PAGE 1 addresses: {addrs1}")
 
-        # ---- 4. Page Size filter ----
-        section("Page Size filter popover")
-        try:
-            page.get_by_label('Page Size', exact=False).first.click(timeout=8000)
-            page.wait_for_timeout(1000)
-            dump_popover(page, 'Page Size')
-            page.keyboard.press('Escape')
-            page.wait_for_timeout(500)
-        except Exception as e:
-            log.warning(f"Page Size popover failed: {e}")
+        for target_page in [2, 3]:
+            try:
+                btn = page.get_by_role('button', name=str(target_page), exact=True).first
+                if btn.count() == 0:
+                    log.warning(f"No button labelled {target_page!r} found -- stopping pagination test.")
+                    break
+                before_sig = first_card_signature(page)
+                t0 = time.monotonic()
+                btn.click(timeout=8000)
+                # Wait for the first card to actually change.
+                changed = False
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    now_sig = first_card_signature(page)
+                    if now_sig and now_sig != before_sig:
+                        changed = True
+                        break
+                    page.wait_for_timeout(200)
+                dt = time.monotonic() - t0
+                sig_n = first_card_signature(page)
+                addrs_n = all_addresses(page)
+                url_n = page.url
+                log.info(f"PAGE {target_page}: clicked in {dt:.2f}s, changed={changed}, "
+                         f"url={url_n} (same_as_page1={url_n == url0}) "
+                         f"first_card={sig_n!r} n_addrs={len(addrs_n)}")
+                log.info(f"PAGE {target_page} addresses: {addrs_n}")
+                overlap = set(addrs1) & set(addrs_n)
+                log.info(f"PAGE {target_page}: overlap with page 1 addresses: {overlap}")
+            except Exception as e:
+                log.warning(f"Pagination to page {target_page} failed: {e}")
+                break
 
-        # ---- 5. Map marker click ----
-        section("Map marker click")
+        # ---- 3. Jump toward the tail to see how the sliding window / ellipsis behaves ----
         try:
-            marker = page.locator('.leaflet-marker-icon, .leaflet-interactive').first
-            if marker.count() > 0:
-                marker.click(timeout=5000, force=True)
+            ell = page.get_by_text('...', exact=True).first
+            if ell.count() > 0:
+                log.info("Found a '...' element -- attempting to click it.")
+                before_sig = first_card_signature(page)
+                ell.click(timeout=5000)
                 page.wait_for_timeout(1500)
-                popup_text = page.evaluate("""() => {
-                    const p = document.querySelector('.leaflet-popup-content, .leaflet-popup');
-                    return p ? p.textContent.trim() : null;
-                }""")
-                log.info(f"Map marker click -> popup text: {popup_text!r}")
+                after_sig = first_card_signature(page)
+                log.info(f"After clicking '...': first_card {before_sig!r} -> {after_sig!r}")
+                # Dump what page-number buttons are visible now.
+                nums = page.evaluate("""() => Array.from(document.querySelectorAll('button'))
+                    .map(b => (b.textContent||'').trim()).filter(t => /^\\d+$/.test(t))""")
+                log.info(f"Visible page-number buttons after '...' click: {nums}")
             else:
-                log.info("No leaflet marker found to click.")
+                log.info("No '...' element found (button-only pager, or all pages fit).")
         except Exception as e:
-            log.warning(f"Map marker click failed: {e}")
+            log.warning(f"Ellipsis click test failed: {e}")
 
-        # ---- 6. Export/download affordance anywhere ----
-        section("Export/download affordance search")
+        # ---- 4. Try the last page button directly (label '29') to test far jump ----
         try:
-            exporters = page.evaluate(ALL_TITLED_JS)
-            log.info(f"Elements with export/download/csv/excel/print title or aria: {exporters}")
+            last_btn = page.get_by_role('button', name='29', exact=True).first
+            if last_btn.count() > 0:
+                before_sig = first_card_signature(page)
+                last_btn.click(timeout=8000)
+                page.wait_for_timeout(2000)
+                after_sig = first_card_signature(page)
+                addrs_last = all_addresses(page)
+                log.info(f"PAGE 29 (direct click): first_card {before_sig!r} -> {after_sig!r}; "
+                         f"n_addrs={len(addrs_last)}")
+                log.info(f"PAGE 29 addresses: {addrs_last}")
+            else:
+                log.info("No page-'29' button visible directly (expected if window slid).")
         except Exception as e:
-            log.warning(f"Export search failed: {e}")
+            log.warning(f"Direct last-page click failed: {e}")
 
-        # ---- 7. Filter to Single Family + Mobile Home only, check count ----
-        section("Toggle Property Type filter, observe count")
-        try:
-            # Reset first so we start from a known baseline.
-            page.get_by_role('button', name='RESET FILTERS').click(timeout=5000)
-            page.wait_for_timeout(1500)
-            wait_for_cards(page)
-
-            page.get_by_text('All Properties Types', exact=False).first.click(timeout=8000)
-            page.wait_for_timeout(1000)
-            all_items = page.evaluate("""() => {
-                const pops = Array.from(document.querySelectorAll('.mud-popover, [class*="popover"]'));
-                let out = [];
-                for (const p of pops) {
-                    if (p.offsetParent === null) continue;
-                    out = out.concat(Array.from(p.querySelectorAll('.mud-list-item')).map(li => (li.textContent||'').trim()));
-                }
-                return out;
-            }""")
-            log.info(f"Property Type list items while open ({len(all_items)}): {all_items}")
-            save('property_type_items.txt', '\n'.join(all_items))
-        except Exception as e:
-            log.warning(f"Toggle-filter section failed: {e}")
-
-        log.info("\n=== PROBE COMPLETE ===")
+        log.info("=== PROBE COMPLETE ===")
         browser.close()
 
 
