@@ -331,7 +331,26 @@ class CollinCountyScraper(BaseScraper):
         except Exception:
             return True
 
-    def _click_next(self, page, expected_next: int) -> bool:
+    def _click_next(self, page, current_page: int) -> Optional[int]:
+        """Click "Next page" and return the page number actually reached, or
+        None if it never advanced past `current_page` at all (genuinely
+        stuck) after both attempts.
+
+        Deliberately tolerant of landing PAST `current_page + 1`: the first
+        click after initial load can take up to ~15-25s to resolve (a one
+        -time server/SignalR warm-up, confirmed in a real production run --
+        see module docstring), so it's theoretically possible for that slow
+        response to finally land just as this method's own retry fires a
+        second click, overshooting by more than one page. Treating "didn't
+        land on EXACTLY current_page + 1" as fatal would abandon the ENTIRE
+        rest of the scrape over one timing race; instead we continue from
+        wherever we verifiably are (losing at most the skipped page's rows,
+        not everything after it) and log a warning so it's visible, not
+        silent. Even a skipped page isn't permanent data loss here: this
+        portal lists every currently-open notice, not just new-since
+        -yesterday ones, so a page missed today is picked up on tomorrow's
+        run (see SYSTEM_GUIDE.md bug #1/#2 -- prefer a loud, recoverable
+        degradation over an all-or-nothing failure)."""
         for attempt in (1, 2):
             try:
                 page.locator('button[aria-label="Next page"]').click(timeout=10_000)
@@ -340,14 +359,23 @@ class CollinCountyScraper(BaseScraper):
                 continue
             deadline = time.monotonic() + NEXT_CLICK_TIMEOUT_S
             while time.monotonic() < deadline:
-                if self._current_page_number(page) == expected_next and self._row_count(page) > 0:
-                    return True
+                cur = self._current_page_number(page)
+                if cur is not None and cur > current_page and self._row_count(page) > 0:
+                    if cur != current_page + 1:
+                        self.logger.warning(
+                            f"Collin: expected page {current_page + 1} but landed on "
+                            f"page {cur} (likely a slow prior response resolving late) "
+                            f"-- page(s) {current_page + 1} to {cur - 1} may have been "
+                            "skipped this run; continuing from here (self-heals on "
+                            "tomorrow's run since this portal lists all open notices, "
+                            "not just new ones).")
+                    return cur
                 page.wait_for_timeout(300)
             self.logger.warning(
-                f"Collin: page did not advance to {expected_next} within "
+                f"Collin: page did not advance past {current_page} within "
                 f"{NEXT_CLICK_TIMEOUT_S}s (attempt {attempt}; now at page "
                 f"{self._current_page_number(page)}, rows={self._row_count(page)}).")
-        return False
+        return None
 
     def _parse_rows(self, page) -> List[Dict]:
         try:
@@ -378,12 +406,13 @@ class CollinCountyScraper(BaseScraper):
                     f"Collin: hit MAX_PAGES={MAX_PAGES} safety cap -- stopping early "
                     "(results may be truncated; investigate if this recurs).")
                 break
-            if not self._click_next(page, page_num + 1):
+            new_page = self._click_next(page, page_num)
+            if new_page is None:
                 self.logger.error(
                     f"Collin: pagination stalled after page {page_num} -- stopping "
                     "early (results may be truncated).")
                 break
-            page_num += 1
+            page_num = new_page
 
         return rows
 
