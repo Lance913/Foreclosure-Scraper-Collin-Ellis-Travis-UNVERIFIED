@@ -119,19 +119,31 @@ def main():
             log.warning(f"Dismissing banner failed (non-fatal): {str(e)[:200]}")
 
         # Look for a "Property (By Name)" or similar search entry point and
-        # click into it to see the real search form (guest, no login).
+        # click into it to see the real search form (guest, no login). There
+        # can be multiple matching elements (hidden templates/duplicates) --
+        # pick the first genuinely VISIBLE one rather than assuming .first.
         try:
             candidates = ['Property (By Name)', 'Property Search', 'Search', 'Advanced Search']
             clicked = False
             for text in candidates:
                 loc = page.get_by_text(text, exact=False)
-                if loc.count() > 0:
-                    log.info(f"Clicking candidate search entry point: {text!r}")
-                    loc.first.click(timeout=8000, force=True)
-                    clicked = True
+                n = loc.count()
+                if n == 0:
+                    continue
+                log.info(f"'{text}' matched {n} element(s) -- checking visibility of each")
+                for i in range(n):
+                    el = loc.nth(i)
+                    is_vis = el.is_visible()
+                    log.info(f"  [{i}] visible={is_vis}")
+                    if is_vis:
+                        log.info(f"Clicking visible match [{i}] for {text!r}")
+                        el.click(timeout=8000)
+                        clicked = True
+                        break
+                if clicked:
                     break
             if not clicked:
-                log.warning("No obvious search entry point text matched -- check '01_landing' dump above.")
+                log.warning("No VISIBLE search entry point found -- check '01_landing' dump above.")
             page.wait_for_timeout(2000)
             shot(page, '02_after_click_search_entry')
             dump_body_text(page, '02_after_click_search_entry')
