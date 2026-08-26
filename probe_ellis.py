@@ -151,6 +151,61 @@ def main():
         except Exception as e:
             log.error(f"Clicking into search failed: {str(e)[:300]}", exc_info=True)
 
+        # Real search form confirmed (v3): Name (optional), Date Range
+        # ("Specific Date Range" + From/To pickers), DocTypesList multi-
+        # select including 'NOTICE' (where Notice of Trustee's Sale filings
+        # live in this vendor's generic doc-type taxonomy -- same pattern as
+        # the publicsearch.us counties in the sister repo). Try a real
+        # search: leave Name blank, set a wide date range, select NOTICE,
+        # submit -- and see whether the g-recaptcha-response field actually
+        # gates submission or is just a dormant v3/invisible check.
+        try:
+            from datetime import date, timedelta
+            today = date.today()
+            start = today - timedelta(days=60)
+            page.fill('#FromDatePicker', start.strftime('%m/%d/%Y'))
+            page.fill('#ToDatePicker', today.strftime('%m/%d/%Y'))
+            log.info(f"Set date range {start:%m/%d/%Y} .. {today:%m/%d/%Y}")
+
+            # Open the doc-types multiselect UI and pick NOTICE.
+            page.locator('input[placeholder="Select DocTypes..."]').first.click(timeout=5000)
+            page.wait_for_timeout(500)
+            notice_opt = page.get_by_text('NOTICE', exact=True)
+            if notice_opt.count() > 0:
+                notice_opt.first.click(timeout=5000)
+                log.info("Selected DocType: NOTICE")
+            else:
+                log.warning("Could not find a clickable 'NOTICE' option in the doctype picker UI")
+            page.wait_for_timeout(500)
+            shot(page, '03_pre_submit')
+
+            page.locator('#SearchBtn').click(timeout=8000)
+            page.wait_for_timeout(2500)
+            try:
+                page.wait_for_load_state('networkidle', timeout=15000)
+            except Exception:
+                pass
+            log.info(f"Post-submit: url={page.url!r} title={page.title()!r}")
+            shot(page, '04_results')
+            dump_body_text(page, '04_results', n=150)
+
+            # Any visible CAPTCHA challenge on the page now?
+            recaptcha_visible = page.evaluate(
+                "() => { const el = document.querySelector('.g-recaptcha, iframe[src*=\"recaptcha\"]'); "
+                "return !!el && el.offsetWidth > 0 && el.offsetHeight > 0; }")
+            log.info(f"Visible reCAPTCHA challenge present after submit: {recaptcha_visible}")
+
+            tables = page.evaluate("""
+                () => [...document.querySelectorAll('table')].map(t => ({
+                    id: t.id, cls: (t.className||'').toString().slice(0,60),
+                    headers: [...t.querySelectorAll('th')].map(h => (h.textContent||'').trim()),
+                    rowCount: t.querySelectorAll('tr').length
+                }))
+            """)
+            log.info(f"Tables on results page: {tables}")
+        except Exception as e:
+            log.error(f"Search submission step failed: {str(e)[:300]}", exc_info=True)
+
         browser.close()
 
     log.info("Probe complete. Read the body-text and form-field dumps above before writing any scraper code.")
