@@ -105,6 +105,19 @@ def main():
         dump_body_text(page, '01_landing')
         dump_form_fields(page, '01_landing')
 
+        # Dismiss the "your browser is out of date... Update browser Ignore"
+        # banner first -- it likely overlays the page and intercepts clicks
+        # on anything underneath (same class of issue as Travis's onboarding
+        # tour popup).
+        try:
+            ignore_btn = page.get_by_text('Ignore', exact=True)
+            if ignore_btn.count() > 0:
+                log.info("Dismissing browser-warning banner via 'Ignore'")
+                ignore_btn.first.click(timeout=5000)
+                page.wait_for_timeout(500)
+        except Exception as e:
+            log.warning(f"Dismissing banner failed (non-fatal): {str(e)[:200]}")
+
         # Look for a "Property (By Name)" or similar search entry point and
         # click into it to see the real search form (guest, no login).
         try:
@@ -114,7 +127,7 @@ def main():
                 loc = page.get_by_text(text, exact=False)
                 if loc.count() > 0:
                     log.info(f"Clicking candidate search entry point: {text!r}")
-                    loc.first.click(timeout=8000)
+                    loc.first.click(timeout=8000, force=True)
                     clicked = True
                     break
             if not clicked:
