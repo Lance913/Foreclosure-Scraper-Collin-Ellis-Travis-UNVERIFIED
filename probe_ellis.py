@@ -174,7 +174,11 @@ def main():
             # directly and dispatch a change event, which is what most of
             # these JS-multiselect widgets listen for to sync their own
             # display state.
-            page.select_option('#DocTypesList', label='NOTICE', timeout=5000)
+            # force=True: the native <select> is truly hidden (display:none-
+            # style, behind the custom widget), not just visually covered,
+            # so select_option's default visibility actionability check
+            # times out -- confirmed by v5's failure.
+            page.locator('#DocTypesList').select_option(label='NOTICE', force=True, timeout=5000)
             page.evaluate("""
                 () => {
                     const el = document.getElementById('DocTypesList');
