@@ -2,9 +2,12 @@
 Google Sheets Writer — Foreclosure Leads (Collin, Ellis, Travis)
 
 Writes into the SAME spreadsheet used by the Probate-Scraper-TX repo, but on
-its own tabs, so the two lead types never mix:
-  - 'Foreclosure Leads'        (this repo's records)
-  - 'Foreclosure Daily Counts' (this repo's per-day/per-county tracker)
+its own tabs, so the two lead types never mix. Leads get their own tab PER
+COUNTY (e.g. 'Collin-Foreclosure'), auto-created on first write — easier to
+scan/filter per county than one giant combined tab. There is one shared
+tracker tab across all counties:
+  - '{County}-Foreclosure'      (one per county, this repo's records)
+  - 'Foreclosure Daily Counts'  (this repo's per-day/per-county tracker)
 
 Dedup key priority:
   1. If doc_id present → county + doc_id (unique per filing regardless of name)
@@ -32,7 +35,7 @@ from google.oauth2.service_account import Credentials
 
 logger = logging.getLogger('sheets_writer')
 
-SPREADSHEET_ID = '1HFkUVz-yFo91ksGu081w9ZTh_aQ0f-xNzskk7R3H7CA'
+SPREADSHEET_ID = '1i3u7U-GGvJ95tH4zk0B1TjaGEplNpUd7fyPj-EaoBWE'
 
 SCOPES = [
     'https://spreadsheets.google.com/feeds',
@@ -57,7 +60,12 @@ COLUMN_HEADERS = [
 FILE_DATE_COL = COLUMN_HEADERS.index('Foreclosure File Date') + 1
 LAST_COL_LETTER = chr(ord('A') + len(COLUMN_HEADERS) - 1)
 
-LEADS_TAB = 'Foreclosure Leads'
+LEADS_SUFFIX = 'Foreclosure'  # per-county tab name: '{County}-Foreclosure'
+
+
+def _leads_tab_name(county: str) -> str:
+    return f"{str(county).strip().title()}-{LEADS_SUFFIX}"
+
 
 # ── Daily tracker tab ───────────────────────────────────────────────────────
 TRACKER_TAB = 'Foreclosure Daily Counts'
@@ -180,47 +188,61 @@ def _sort_by_file_date(worksheet: gspread.Worksheet):
 
 
 def write_records(records: List[Dict], pull_date: str = '') -> List[Dict]:
-    """Write new (non-duplicate) records. Returns the records actually written,
-    so callers can report a true per-county 'new today' count."""
+    """Write new (non-duplicate) records, one tab per county. Returns the
+    records actually written, so callers can report a true per-county 'new
+    today' count."""
     if not records:
         logger.info("No records to write.")
         return []
 
     def _do():
-        client    = _get_client()
-        worksheet = _get_or_create_worksheet(client.open_by_key(SPREADSHEET_ID),
-                                              LEADS_TAB, COLUMN_HEADERS)
-        existing  = _existing_keys(worksheet)
+        ss = _get_client().open_by_key(SPREADSHEET_ID)
 
-        new_rows, new_records, seen_today = [], [], set()
+        by_county: Dict[str, List[Dict]] = {}
         for rec in records:
-            key = _record_key(rec)
-            if key in existing or key in seen_today:
-                continue
-            seen_today.add(key)
-            new_rows.append(_to_row(rec, pull_date))
-            new_records.append(rec)
+            by_county.setdefault(str(rec.get('county', '')).strip(), []).append(rec)
 
-        if new_rows:
-            worksheet.append_rows(new_rows, value_input_option='USER_ENTERED')
-            logger.info(f"Wrote {len(new_rows)} new rows to Google Sheets.")
-            _sort_by_file_date(worksheet)
-        else:
-            logger.info("All records were duplicates — nothing written.")
-        return new_records
+        all_new_records: List[Dict] = []
+        for county, county_records in by_county.items():
+            tab_name  = _leads_tab_name(county)
+            worksheet = _get_or_create_worksheet(ss, tab_name, COLUMN_HEADERS)
+            existing  = _existing_keys(worksheet)
+
+            new_rows, new_records, seen_today = [], [], set()
+            for rec in county_records:
+                key = _record_key(rec)
+                if key in existing or key in seen_today:
+                    continue
+                seen_today.add(key)
+                new_rows.append(_to_row(rec, pull_date))
+                new_records.append(rec)
+
+            if new_rows:
+                worksheet.append_rows(new_rows, value_input_option='USER_ENTERED')
+                logger.info(f"{tab_name}: wrote {len(new_rows)} new rows.")
+                _sort_by_file_date(worksheet)
+            else:
+                logger.info(f"{tab_name}: all records were duplicates — nothing written.")
+            all_new_records.extend(new_records)
+
+        return all_new_records
 
     return _with_retry(_do, 'write_records')
 
 
 def reset_all() -> None:
-    """Wipe the leads tab and the tracker tab, leaving only fresh headers."""
+    """Wipe every per-county leads tab and the tracker tab, leaving only
+    fresh headers. Discovers leads tabs dynamically (anything ending in
+    '-{LEADS_SUFFIX}') so it stays correct as counties are added, without
+    needing a hardcoded county list."""
     def _do():
         ss = _get_client().open_by_key(SPREADSHEET_ID)
 
-        leads = _get_or_create_worksheet(ss, LEADS_TAB, COLUMN_HEADERS)
-        leads.clear()
-        leads.update('A1', [COLUMN_HEADERS], value_input_option='USER_ENTERED')
-        logger.info(f"Reset '{LEADS_TAB}' tab.")
+        for ws in ss.worksheets():
+            if ws.title.endswith(f'-{LEADS_SUFFIX}'):
+                ws.clear()
+                ws.update('A1', [COLUMN_HEADERS], value_input_option='USER_ENTERED')
+                logger.info(f"Reset '{ws.title}' tab.")
 
         tracker = _get_or_create_worksheet(ss, TRACKER_TAB, TRACKER_HEADERS)
         tracker.clear()
