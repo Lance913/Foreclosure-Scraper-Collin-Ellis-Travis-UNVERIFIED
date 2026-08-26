@@ -39,6 +39,20 @@ ENTITY_EXCLUDE_KEYWORDS = [
     'CITY OF', 'COUNTY OF', 'DEPARTMENT', 'REVENUE', 'AUTHORITY', 'DISTRICT',
 ]
 
+# Word-boundary-wrapped version of each keyword, compiled once at import time
+# rather than per call. Plain substring containment (`ex in name`) is
+# unguarded and matches keywords embedded inside real surnames -- e.g. 'INC'
+# inside "Vincent", 'HOA' inside "Hoag", 'LP' inside "Alpert" -- silently
+# rejecting genuine homeowner leads as if they were entities. \b anchors each
+# keyword to whole-token boundaries (a keyword still matches across internal
+# punctuation like 'L.L.C' or multi-word phrases like 'CITY OF', since \b is
+# only asserted at the two ends of the escaped keyword, not between its own
+# characters) so it only fires when the keyword appears as its own token,
+# not as a fragment of a longer word.
+_ENTITY_EXCLUDE_PATTERNS = [
+    re.compile(r'\b' + re.escape(kw) + r'\b') for kw in ENTITY_EXCLUDE_KEYWORDS
+]
+
 
 def is_residential_lead(name: str) -> bool:
     """True if an extracted owner name looks like an individual, not an entity.
@@ -46,7 +60,7 @@ def is_residential_lead(name: str) -> bool:
     if not name:
         return True
     g = name.upper()
-    return not any(ex in g for ex in ENTITY_EXCLUDE_KEYWORDS)
+    return not any(p.search(g) for p in _ENTITY_EXCLUDE_PATTERNS)
 
 
 def launch_chromium(pw, **kwargs):

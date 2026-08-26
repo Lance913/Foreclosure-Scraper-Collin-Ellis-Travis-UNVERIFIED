@@ -26,9 +26,9 @@ from typing import List, Dict
 
 from scrapers import (
     CollinCountyScraper,
+    TravisCountyScraper,
     # Add each remaining county's scraper class here as it's built, e.g.:
     # EllisCountyScraper,
-    # TravisCountyScraper,
 )
 import sheets_writer
 
@@ -42,14 +42,14 @@ logger = logging.getLogger('main')
 # Add each county's slug here as its scraper is completed and merged.
 ALL_COUNTIES = [
     'collin',
+    'travis',
     # 'ellis',
-    # 'travis',
 ]
 
 SCRAPER_MAP = {
     'collin': CollinCountyScraper,
+    'travis': TravisCountyScraper,
     # 'ellis':  EllisCountyScraper,
-    # 'travis': TravisCountyScraper,
 }
 
 

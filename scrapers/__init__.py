@@ -8,11 +8,15 @@ Add each new county's import + name below as its scraper is completed:
 
     from .collin import CollinCountyScraper
     from .ellis import EllisCountyScraper
-    from .travis import TravisCountyScraper
+    from .counties import TravisCountyScraper
 
     __all__ = ['CollinCountyScraper', 'EllisCountyScraper', 'TravisCountyScraper']
+
+Travis: publicsearch.us/GovOS (scrapers/publicsearch.py, thin wrapper in
+scrapers/counties.py) -- same platform as Bexar/Dallas/Tarrant/Denton/Johnson
+in the sister repo.
 """
-
 from .collin import CollinCountyScraper
+from .counties import TravisCountyScraper
 
-__all__ = ['CollinCountyScraper']
+__all__ = ['CollinCountyScraper', 'TravisCountyScraper']

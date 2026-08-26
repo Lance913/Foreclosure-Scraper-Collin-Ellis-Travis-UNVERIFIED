@@ -1,0 +1,52 @@
+name: Probe Travis County Portal
+
+# NOTE: workflow_dispatch requires the workflow file to be registered on the
+# default branch before `gh workflow run` can find it by name -- which we
+# deliberately avoid (no direct pushes/merges to main during investigation,
+# per SYSTEM_GUIDE.md's PR-only rule on the default branch). `push` does not
+# have that limitation (the run is built directly from the pushed commit's
+# copy of this file), so that's the primary trigger during probing -- just
+# `git push` to this branch and a new run starts automatically. This whole
+# file is throwaway and gets deleted once the real scraper is written.
+on:
+  push:
+    branches: [add-travis-scraper]
+    paths:
+      - 'probe_travis.py'
+      - '.github/workflows/probe_travis.yml'
+      - 'scrapers/**'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system OCR deps (tesseract)
+        run: |
+          timeout 60 sudo apt-get update -o Acquire::Retries=3 || true
+          sudo apt-get install -y tesseract-ocr
+
+      - name: Install Python deps
+        run: pip install playwright requests pytesseract Pillow
+
+      - name: Install Chromium
+        run: playwright install chromium --with-deps
+
+      - name: Run probe
+        run: python probe_travis.py
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: travis-probe-screenshots
+          path: probe_artifacts/
+          if-no-files-found: warn
