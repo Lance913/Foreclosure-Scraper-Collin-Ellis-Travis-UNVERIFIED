@@ -167,18 +167,21 @@ def main():
             page.fill('#ToDatePicker', today.strftime('%m/%d/%Y'))
             log.info(f"Set date range {start:%m/%d/%Y} .. {today:%m/%d/%Y}")
 
-            # Open the doc-types multiselect UI and pick NOTICE. "Select
-            # DocTypes..." is rendered display text, not an HTML placeholder
-            # attribute (confirmed by v4's failed placeholder-selector
-            # attempt) -- click on the text itself instead.
-            page.get_by_text('Select DocTypes...', exact=True).first.click(timeout=5000)
-            page.wait_for_timeout(500)
-            notice_opt = page.get_by_text('NOTICE', exact=True)
-            if notice_opt.count() > 0:
-                notice_opt.first.click(timeout=5000)
-                log.info("Selected DocType: NOTICE")
-            else:
-                log.warning("Could not find a clickable 'NOTICE' option in the doctype picker UI")
+            # DocTypesList is a native <select multiple> hidden behind a
+            # custom-widget overlay ("Select DocTypes..." fake input) --
+            # two attempts at clicking through that widget's UI both timed
+            # out. Bypass the widget entirely: set the native select's value
+            # directly and dispatch a change event, which is what most of
+            # these JS-multiselect widgets listen for to sync their own
+            # display state.
+            page.select_option('#DocTypesList', label='NOTICE', timeout=5000)
+            page.evaluate("""
+                () => {
+                    const el = document.getElementById('DocTypesList');
+                    if (el) el.dispatchEvent(new Event('change', {bubbles: true}));
+                }
+            """)
+            log.info("Selected DocType: NOTICE (via select_option + change event)")
             page.wait_for_timeout(500)
             shot(page, '03_pre_submit')
 
