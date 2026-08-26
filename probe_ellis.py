@@ -167,8 +167,11 @@ def main():
             page.fill('#ToDatePicker', today.strftime('%m/%d/%Y'))
             log.info(f"Set date range {start:%m/%d/%Y} .. {today:%m/%d/%Y}")
 
-            # Open the doc-types multiselect UI and pick NOTICE.
-            page.locator('input[placeholder="Select DocTypes..."]').first.click(timeout=5000)
+            # Open the doc-types multiselect UI and pick NOTICE. "Select
+            # DocTypes..." is rendered display text, not an HTML placeholder
+            # attribute (confirmed by v4's failed placeholder-selector
+            # attempt) -- click on the text itself instead.
+            page.get_by_text('Select DocTypes...', exact=True).first.click(timeout=5000)
             page.wait_for_timeout(500)
             notice_opt = page.get_by_text('NOTICE', exact=True)
             if notice_opt.count() > 0:
