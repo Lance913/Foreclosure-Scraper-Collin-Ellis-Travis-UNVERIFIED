@@ -14,10 +14,9 @@ Add each new county's import + name below as its scraper is completed:
 
 Travis: publicsearch.us/GovOS (scrapers/publicsearch.py, thin wrapper in
 scrapers/counties.py) -- same platform as Bexar/Dallas/Tarrant/Denton/Johnson
-in the sister repo. NOT YET wired into main.py's ALL_COUNTIES/SCRAPER_MAP --
-see probe_travis.py and the PR description for what's confirmed vs. still
-being verified before it's flipped on for real dry-run testing.
+in the sister repo.
 """
+from .collin import CollinCountyScraper
 from .counties import TravisCountyScraper
 
-__all__ = ['TravisCountyScraper']
+__all__ = ['CollinCountyScraper', 'TravisCountyScraper']
