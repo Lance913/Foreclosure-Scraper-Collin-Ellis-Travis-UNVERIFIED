@@ -1,0 +1,31 @@
+name: Register Ellis County Account
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+      - name: Install Playwright Chromium
+        run: playwright install --with-deps chromium
+      - name: Run registration
+        env:
+          ACCOUNT_EMAIL: ${{ secrets.PORTAL_ACCOUNT_EMAIL }}
+          ACCOUNT_PASSWORD: ${{ secrets.PORTAL_ACCOUNT_PASSWORD }}
+        run: python register_ellis.py
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ellis-register-result
+          path: probe_artifacts/
+          if-no-files-found: warn
