@@ -172,10 +172,36 @@ def main():
 
         # Click into the first real result row to see if the document
         # detail/image exposes a real street address (the results table
-        # only has a legal description, not a mailing address).
+        # only has a legal description, not a mailing address). v1 clicked
+        # the bare <tr> and nothing happened (same URL/body after) -- dump
+        # the row's actual cell/link structure first, then click whatever
+        # is truly clickable in it (likely the 'Record' column's icon/link,
+        # not the row itself).
         try:
-            first_row = page.locator('table.k-selectable tr').nth(1)
-            first_row.click(timeout=8000)
+            row_html = page.evaluate("""
+                () => {
+                    const t = document.querySelector('table.k-selectable');
+                    const tr = t ? t.querySelectorAll('tr')[1] : null;
+                    return tr ? tr.outerHTML.slice(0, 2000) : '(no row found)';
+                }
+            """)
+            log.info(f"First data row HTML: {row_html}")
+
+            clicked = False
+            for sel in ['table.k-selectable tr:nth-child(2) a',
+                        'table.k-selectable tr:nth-child(2) img',
+                        'table.k-selectable tr:nth-child(2) button',
+                        'table.k-selectable tr:nth-child(2) td:first-child']:
+                loc = page.locator(sel).first
+                if loc.count() > 0:
+                    log.info(f"Clicking via {sel!r}")
+                    loc.click(timeout=5000, force=True)
+                    clicked = True
+                    break
+            if not clicked:
+                log.error("No clickable element found in first row via any selector tried.")
+                browser.close()
+                return
             page.wait_for_timeout(2000)
             try:
                 page.wait_for_load_state('networkidle', timeout=10000)
