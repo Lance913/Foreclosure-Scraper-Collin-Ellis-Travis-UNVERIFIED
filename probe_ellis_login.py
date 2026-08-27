@@ -86,8 +86,10 @@ def main():
         logged_in = 'Welcome, Guest' not in body
         log.info(f"Login appears successful (no longer 'Welcome, Guest'): {logged_in}")
 
-        # Go to Property (By Name) search and try a name-less date+doctype search.
-        loc = page.get_by_text('Property (By Name)', exact=False)
+        # Logged-in accounts unlock 'Property (By Date Range/Doc Type)' --
+        # confirmed via login probe v1's menu dump -- exactly the name-less
+        # search guest access lacked. Use that, not 'Property (By Name)'.
+        loc = page.get_by_text('Property (By Date Range/Doc Type)', exact=False)
         clicked = False
         for i in range(loc.count()):
             el = loc.nth(i)
@@ -96,32 +98,60 @@ def main():
                 clicked = True
                 break
         if not clicked:
-            log.error("Could not find 'Property (By Name)' search link after login.")
+            log.error("Could not find 'Property (By Date Range/Doc Type)' search link after login.")
             browser.close()
             return
         page.wait_for_timeout(1500)
         shot(page, '03_search_form_loggedin')
         log.info(f"reCAPTCHA visible while logged in: {recaptcha_visible(page)}")
 
+        fields = page.evaluate("""
+            () => {
+                const out = [];
+                document.querySelectorAll('input, select').forEach(el => {
+                    out.push({tag: el.tagName, type: el.type||'', id: el.id||'', name: el.name||'',
+                              visible: !!(el.offsetWidth || el.offsetHeight)});
+                });
+                return out;
+            }
+        """)
+        log.info(f"=== 03_search_form_loggedin: {len(fields)} field(s) ===")
+        for f in fields:
+            log.info(f"  | {f}")
+
         from datetime import date, timedelta
         today = date.today()
         start = today - timedelta(days=60)
-        page.fill('#FromDatePicker', start.strftime('%m/%d/%Y'))
-        page.fill('#ToDatePicker', today.strftime('%m/%d/%Y'))
-        log.info(f"Set date range {start:%m/%d/%Y} .. {today:%m/%d/%Y}")
+        # Field IDs confirmed identical to the guest 'By Name' form's date
+        # pickers/doctype list in prior runs -- but this is a DIFFERENT
+        # search page, so verify via the field dump above before trusting
+        # these selectors still apply.
+        try:
+            page.fill('#FromDatePicker', start.strftime('%m/%d/%Y'), timeout=5000)
+            page.fill('#ToDatePicker', today.strftime('%m/%d/%Y'), timeout=5000)
+            log.info(f"Set date range {start:%m/%d/%Y} .. {today:%m/%d/%Y}")
+        except Exception as e:
+            log.error(f"Date field fill failed ({str(e)[:200]}) -- check field dump above for real IDs.")
 
-        page.locator('#DocTypesList').select_option(label='NOTICE', force=True, timeout=5000)
-        page.evaluate("""
-            () => {
-                const el = document.getElementById('DocTypesList');
-                if (el) el.dispatchEvent(new Event('change', {bubbles: true}));
-            }
-        """)
-        log.info("Selected DocType: NOTICE")
+        try:
+            page.locator('#DocTypesList').select_option(label='NOTICE', force=True, timeout=5000)
+            page.evaluate("""
+                () => {
+                    const el = document.getElementById('DocTypesList');
+                    if (el) el.dispatchEvent(new Event('change', {bubbles: true}));
+                }
+            """)
+            log.info("Selected DocType: NOTICE")
+        except Exception as e:
+            log.error(f"DocType select failed ({str(e)[:200]}) -- check field dump above for real IDs.")
         page.wait_for_timeout(500)
         shot(page, '04_before_submit_loggedin')
 
-        page.locator('#SearchBtn').click(timeout=8000)
+        try:
+            page.locator('#SearchBtn').click(timeout=8000)
+        except Exception as e:
+            log.error(f"#SearchBtn click failed ({str(e)[:200]}) -- trying generic Search button.")
+            page.locator('input[type="button"][value="Search" i], input[type="submit"][value="Search" i]').first.click(timeout=8000)
         page.wait_for_timeout(2500)
         try:
             page.wait_for_load_state('networkidle', timeout=15000)
