@@ -170,6 +170,24 @@ def main():
         """)
         log.info(f"Tables on results page: {tables}")
 
+        # Click into the first real result row to see if the document
+        # detail/image exposes a real street address (the results table
+        # only has a legal description, not a mailing address).
+        try:
+            first_row = page.locator('table.k-selectable tr').nth(1)
+            first_row.click(timeout=8000)
+            page.wait_for_timeout(2000)
+            try:
+                page.wait_for_load_state('networkidle', timeout=10000)
+            except Exception:
+                pass
+            log.info(f"After clicking first result: url={page.url!r} title={page.title()!r}")
+            shot(page, '06_record_detail')
+            detail_body = page.evaluate("() => document.body.innerText || ''")
+            log.info(f"Record detail body ({len(detail_body)} chars):\n{detail_body[:3000]}")
+        except Exception as e:
+            log.error(f"Could not open first result's detail: {str(e)[:300]}", exc_info=True)
+
         browser.close()
 
     log.info("Login probe complete.")
