@@ -134,7 +134,29 @@ def main():
             log.error(f"Date field fill failed ({str(e)[:200]}) -- check field dump above for real IDs.")
 
         try:
-            page.locator('#DocTypesList').select_option(label='NOTICE', force=True, timeout=5000)
+            try:
+            page.locator('#ShowOrHideDoctypeGroups').click(timeout=5000)
+            page.wait_for_timeout(500)
+            groups_html = page.evaluate("""
+                () => {
+                    const el = document.getElementById('DocTypesGroupList');
+                    return el ? el.outerHTML.slice(0, 2000) : '(no DocTypesGroupList found)';
+                }
+            """)
+            log.info(f"Document Type Groups content: {groups_html}")
+            group_options = page.evaluate("""
+                () => {
+                    const sel = document.querySelector('select[multiple]');
+                    return Array.from(document.querySelectorAll('[class*="group" i] li, [id*="Group" i] li'))
+                        .map(li => (li.textContent||'').trim()).filter(Boolean);
+                }
+            """)
+            log.info(f"Group option texts found: {group_options}")
+            shot(page, '03b_doctype_groups_open')
+        except Exception as e:
+            log.warning(f"Could not open Document Type Groups: {str(e)[:200]}")
+
+        page.locator('#DocTypesList').select_option(label='NOTICE', force=True, timeout=5000)
             page.evaluate("""
                 () => {
                     const el = document.getElementById('DocTypesList');
