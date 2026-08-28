@@ -26,8 +26,8 @@ from typing import List, Dict
 
 from scrapers import (
     CollinCountyScraper,
+    EllisCountyScraper,
     # Add each remaining county's scraper class here as it's built, e.g.:
-    # EllisCountyScraper,
     # TravisCountyScraper,
 )
 import sheets_writer
@@ -42,13 +42,13 @@ logger = logging.getLogger('main')
 # Add each county's slug here as its scraper is completed and merged.
 ALL_COUNTIES = [
     'collin',
-    # 'ellis',
+    'ellis',
     # 'travis',
 ]
 
 SCRAPER_MAP = {
     'collin': CollinCountyScraper,
-    # 'ellis':  EllisCountyScraper,
+    'ellis':  EllisCountyScraper,
     # 'travis': TravisCountyScraper,
 }
 
@@ -75,9 +75,13 @@ def parse_args():
 
 
 def _useful(r: Dict) -> bool:
-    """Keep only records that have a property address — an address is required
-    for skip-tracing, so a name-only or doc-id-only record isn't actionable."""
-    return bool(r.get('address'))
+    """Keep records that have a property address (best case), OR a full
+    first+last name (skip-traceable by name+county even without an address
+    — Ellis's portal exposes no free address at all, see scrapers/ellis.py).
+    A bare doc-id with neither is not actionable."""
+    if r.get('address'):
+        return True
+    return bool(r.get('first_name')) and bool(r.get('last_name'))
 
 
 def load_records(patterns: List[str]) -> List[Dict]:

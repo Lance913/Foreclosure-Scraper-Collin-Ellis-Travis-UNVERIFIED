@@ -29,7 +29,9 @@ jobs:
       - id: set
         run: |
           COUNTIES="${{ github.event.inputs.counties }}"
-          if [ -z "$COUNTIES" ]; then COUNTIES="collin ellis travis"; fi
+          # Default matches what's actually wired into main.py's SCRAPER_MAP --
+          # keep in sync as counties land (Travis isn't merged yet).
+          if [ -z "$COUNTIES" ]; then COUNTIES="collin ellis"; fi
           ARR=$(echo "$COUNTIES" | tr ' ' '\n' | grep -v '^$' | jq -R . | jq -cs .)
           echo "matrix=$ARR" >> "$GITHUB_OUTPUT"
           echo "Matrix: $ARR"
@@ -67,6 +69,12 @@ jobs:
         run: playwright install --with-deps chromium
 
       - name: Scrape ${{ matrix.county }}
+        env:
+          # Ellis requires a logged-in session -- guest access can't do a
+          # name-less date+doctype search (see scrapers/ellis.py). Harmless
+          # no-op for counties that don't need it.
+          ACCOUNT_EMAIL: ${{ secrets.PORTAL_ACCOUNT_EMAIL }}
+          ACCOUNT_PASSWORD: ${{ secrets.PORTAL_ACCOUNT_PASSWORD }}
         run: |
           ARGS=""
           DATE="${{ github.event.inputs.date }}"
