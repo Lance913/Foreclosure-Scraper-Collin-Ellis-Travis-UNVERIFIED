@@ -52,46 +52,58 @@ def main():
         depts = page.evaluate("""() => {
             const out=[];
             const lb=document.querySelector('#department-listbox');
-            if(lb) for(const o of lb.querySelectorAll('[role="option"],li')) out.push((o.textContent||'').trim());
+            if(lb) for(const o of lb.querySelectorAll('[role="option"],li'))
+                out.push({text:(o.textContent||'').trim(), value:o.getAttribute('data-value')||o.getAttribute('value')||''});
             return out;
         }""")
-        log.info(f"department options: {depts}")
+        log.info(f"department options (text/value): {depts}")
 
-        log.info(f"Loading FC results -> {results_url}")
-        page.goto(results_url)
-        page.wait_for_load_state('networkidle')
-        page.wait_for_timeout(5000)
-        log.info(f"final url after FC results nav: {page.url!r} title={page.title()!r}")
+        def dump_results(url, label):
+            log.info(f"Loading {label} -> {url}")
+            page.goto(url)
+            page.wait_for_load_state('networkidle')
+            page.wait_for_timeout(5000)
+            log.info(f"[{label}] final url: {page.url!r} title={page.title()!r}")
+            info = page.evaluate("""() => {
+                const tables=[...document.querySelectorAll('table')].map(t=>({
+                    headers:[...t.querySelectorAll('th')].map(h=>(h.textContent||'').trim()),
+                    rows: t.querySelectorAll('tr').length
+                }));
+                const body=(document.body.innerText||'');
+                const nores=/no\\s+results|0\\s+results|no\\s+records|did not match/i.test(body);
+                const m=body.match(/([\\d,]+)\\s+results/i);
+                return {tables, noResultsMsg:nores, countPhrase: m?m[0]:'(none)',
+                        bodyHead: body.split('\\n').map(s=>s.trim()).filter(Boolean).slice(0,50)};
+            }""")
+            log.info(f"[{label}] count={info['countPhrase']} noResultsMsg={info['noResultsMsg']}")
+            for t in info['tables']:
+                log.info(f"[{label}] table headers={t['headers']} rows={t['rows']}")
+            rows = page.evaluate("""() => {
+                const t=document.querySelector('table'); if(!t) return [];
+                const heads=[...t.querySelectorAll('th')].map(h=>(h.textContent||'').trim());
+                const out=[heads];
+                for(const tr of [...t.querySelectorAll('tr')].slice(1,10))
+                    out.push([...tr.querySelectorAll('td')].map(td=>(td.textContent||'').trim()));
+                return out;
+            }""")
+            for r in rows:
+                log.info(f"[{label}] ROW: {r}")
+            page.screenshot(path=f'{ART_DIR}/01_{label}.png', full_page=True)
+            if not info['tables'] or info['noResultsMsg']:
+                log.info(f"[{label}] BODY TEXT (first 50 lines):")
+                for ln in info['bodyHead']:
+                    log.info(f"  | {ln}")
 
-        info = page.evaluate("""() => {
-            const tables=[...document.querySelectorAll('table')].map(t=>({
-                headers:[...t.querySelectorAll('th')].map(h=>(h.textContent||'').trim()),
-                rows: t.querySelectorAll('tr').length
-            }));
-            const body=(document.body.innerText||'');
-            const nores=/no\\s+results|0\\s+results|no\\s+records|did not match/i.test(body);
-            const m=body.match(/([\\d,]+)\\s+results/i);
-            return {tables, noResultsMsg:nores, countPhrase: m?m[0]:'(none)',
-                    bodyHead: body.split('\\n').map(s=>s.trim()).filter(Boolean).slice(0,50)};
-        }""")
-        log.info(f"count={info['countPhrase']} noResultsMsg={info['noResultsMsg']}")
-        for t in info['tables']:
-            log.info(f"table headers={t['headers']} rows={t['rows']}")
-        rows = page.evaluate("""() => {
-            const t=document.querySelector('table'); if(!t) return [];
-            const heads=[...t.querySelectorAll('th')].map(h=>(h.textContent||'').trim());
-            const out=[heads];
-            for(const tr of [...t.querySelectorAll('tr')].slice(1,8))
-                out.push([...tr.querySelectorAll('td')].map(td=>(td.textContent||'').trim()));
-            return out;
-        }""")
-        for r in rows:
-            log.info(f"ROW: {r}")
-        page.screenshot(path=f'{ART_DIR}/01_fc_results.png', full_page=True)
-        if not info['tables'] or info['noResultsMsg']:
-            log.info("BODY TEXT (first 50 lines):")
-            for ln in info['bodyHead']:
-                log.info(f"  | {ln}")
+        dump_results(results_url, 'FC')
+
+        # FC errored (department doesn't exist for Collin) -- try Property
+        # Records (typical publicsearch.us dept code 'RP') with a doc-type
+        # filter for trustee-sale notices, since a county without a
+        # dedicated Foreclosures department may still index NTS filings
+        # under general real-property recordings.
+        rp_url = (f"{BASE}/results?department=RP"
+                  f"&recordedDateRange={start},{end}&searchType=advancedSearch")
+        dump_results(rp_url, 'RP')
 
         browser.close()
 
