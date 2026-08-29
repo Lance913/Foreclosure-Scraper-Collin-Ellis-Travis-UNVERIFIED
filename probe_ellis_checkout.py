@@ -98,30 +98,41 @@ def main():
             pass
         shot(page, '01_results')
 
-        # Add the first row to cart.
+        # Add the first row to cart -- this pops a "Cart Message" confirm
+        # dialog (Party 1/Party 2) that must be OK'd before it actually adds.
         try:
             page.locator('table.k-selectable tr:nth-child(2) button').first.click(timeout=8000)
-            page.wait_for_timeout(1500)
-            shot(page, '02_after_add_to_cart')
-            dump_body_text(page, 'after_add_to_cart')
+            page.wait_for_timeout(1200)
+            shot(page, '02a_confirm_dialog')
+            dump_body_text(page, 'confirm_dialog')
+            ok_btn = page.get_by_text('Ok', exact=True).first
+            if ok_btn.is_visible():
+                log.info("Clicking Ok on cart confirm dialog")
+                ok_btn.click(timeout=5000)
+                page.wait_for_timeout(1500)
+            shot(page, '02b_after_confirm')
+            dump_body_text(page, 'after_confirm')
         except Exception as e:
             log.error(f"Add to cart click failed: {str(e)[:200]}")
 
-        # Look for a cart/checkout link showing price.
-        for text in ['Cart', 'Checkout', 'View Cart', 'Items']:
-            loc = page.get_by_text(text, exact=False)
-            for i in range(loc.count()):
-                el = loc.nth(i)
-                if el.is_visible():
+        # Now find the real cart icon/link (top nav "0 Items $X.XX" area
+        # became "1 Items $X.XX" after confirm) and click through to it.
+        for sel in ['a:has-text("Items")', 'a:has-text("Cart")', '[href*="Cart" i]', '[href*="Checkout" i]']:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0 and loc.is_visible():
+                    log.info(f"Clicking cart nav element via {sel!r}: {loc.inner_text()[:60]!r}")
+                    loc.click(timeout=5000)
+                    page.wait_for_timeout(2000)
                     try:
-                        log.info(f"Clicking cart-related link: {text!r}")
-                        el.click(timeout=5000)
-                        page.wait_for_timeout(1500)
-                        shot(page, f'03_cart_{text.replace(" ", "_")}')
-                        dump_body_text(page, f'cart_{text}')
+                        page.wait_for_load_state('networkidle', timeout=8000)
                     except Exception:
                         pass
+                    shot(page, '03_cart_page')
+                    dump_body_text(page, 'cart_page')
                     break
+            except Exception as e:
+                log.warning(f"{sel!r} failed: {str(e)[:150]}")
 
         browser.close()
 
