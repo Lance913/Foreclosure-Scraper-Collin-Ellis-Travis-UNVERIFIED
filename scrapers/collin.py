@@ -42,17 +42,36 @@ confirmed limitation of this specific PUBLIC-facing lookup tool (it's a
 simplified "is there a notice for my address" consumer tool, not the
 county's full official-records search -- that's a separate publicsearch.us
 instance at collin.tx.publicsearch.us). Records built here are address-only
-(doc_id is always '') until the enrichment pass below fills in a name where
-it can. base.py's build_record() and main.py's `_useful()` already support
-address-only records (an address alone is kept -- a name is not required).
+(first_name/last_name/doc_id are always ''). base.py's build_record() and
+main.py's `_useful()` already support address-only records (an address
+alone is kept -- a name is not required).
 
-Owner-name enrichment: after building address-only records from this
-portal, scrape() calls scrapers/collin_enrich.py, which cross-references
-collin.tx.publicsearch.us (the same publicsearch.us/GovOS platform already
-proven for Bexar/Dallas/Tarrant/Denton/Johnson) by street address and OCRs
-just the matching documents to recover the owner name. This never changes
-which records exist or their addresses -- see that module's docstring for
-the matching/OCR approach and its known limitations.
+Owner-name enrichment: investigated and ruled out (2026-08-29). Three
+free/no-login sources were checked, none work:
+  1. collin.tx.publicsearch.us has NO "Foreclosures" department at all
+     (its department list is only Property Records/Plats/Assumed Names/
+     Census Records/Marriage -- department=FC returns a genuine error
+     page). This is why the county runs the separate apps2 consumer tool
+     in the first place.
+  2. Its "Property Records" department (department=RP) DOES return
+     Grantor/Grantee names directly in the table -- no OCR needed -- but
+     has NO address field (only a Legal Description: subdivision/lot/
+     block), and "NOTICE" is a broad catch-all doc type across ~30k
+     records/60-day window (same ambiguity as Ellis's doctype problem --
+     see scrapers/ellis.py), so there is no reliable, low-cost way to
+     identify which of those rows are even NTS filings, let alone match
+     them to an apps2 address (apps2 exposes no legal description either
+     -- verified via probe_collin_apps2_fields.py -- so there's no shared
+     join key between the two sources).
+  3. Collin CAD (collincad.org), the standard real-world skip-tracing
+     cross-reference (county tax-appraisal owner-of-record by address),
+     is behind a Cloudflare "Checking your browser..." interstitial (403)
+     -- same bot-verification category already ruled out for other
+     counties; not something this project will attempt to solve.
+See probe_collin_publicsearch.py, probe_collin_apps2_fields.py, and
+probe_collin_cad.py for the investigation. A paid, non-scraping property
+data/skip-trace API (looked up by address) is the realistic remaining path
+if owner names for Collin become a priority -- not a portal to scrape.
 
 Property Type filtering -- the hint vs. reality:
   The business's hint was to select "Residential Single Family" and
@@ -110,7 +129,6 @@ from datetime import date
 from typing import Dict, List, Optional
 
 from .base import BaseScraper, is_residential_lead, launch_chromium
-from .collin_enrich import enrich_with_owner_names
 
 SEARCH_URL = "https://apps2.collincountytx.gov/ForeclosureNotices"
 
@@ -283,13 +301,6 @@ class CollinCountyScraper(BaseScraper):
 
         records = self._build_records(raw_rows, target_date)
         self.logger.info(f"Collin: {len(records)} final records")
-
-        try:
-            enrich_with_owner_names(records, target_date, self.logger)
-        except Exception as exc:
-            self.logger.error(f"Collin: name enrichment crashed (addresses unaffected): {exc}",
-                               exc_info=True)
-
         return records
 
     # ── Pagination + row extraction ─────────────────────────────────────────
