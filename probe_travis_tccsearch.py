@@ -74,7 +74,11 @@ def main():
         page.set_default_timeout(30_000)
 
         log.info(f"Loading {BASE_URL} ...")
-        resp = page.goto(BASE_URL, wait_until='networkidle', timeout=30_000)
+        # networkidle timed out here in an earlier run -- a Cloudflare
+        # challenge page likely keeps some background polling/heartbeat
+        # activity going, so networkidle may never be reached (same class
+        # of issue as Collin's Leaflet map -- see scrapers/collin.py).
+        resp = page.goto(BASE_URL, wait_until='domcontentloaded', timeout=30_000)
         log.info(f"status={resp.status if resp else None} final_url={page.url!r} title={page.title()!r}")
         page.wait_for_timeout(3000)  # give a Cloudflare JS challenge time to auto-resolve
         shot(page, '01_landing')
