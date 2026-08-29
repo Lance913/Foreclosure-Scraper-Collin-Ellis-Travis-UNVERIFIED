@@ -41,11 +41,18 @@ scanning the entire DOM for any export/download/CSV/Excel/print affordance
 confirmed limitation of this specific PUBLIC-facing lookup tool (it's a
 simplified "is there a notice for my address" consumer tool, not the
 county's full official-records search -- that's a separate publicsearch.us
-instance at collin.tx.publicsearch.us, explicitly out of scope for this
-module per the assignment). Records here are therefore address-only leads:
-first_name/last_name are always '', doc_id is always ''. base.py's
-build_record() and main.py's `_useful()` already support address-only
-records (an address alone is kept -- a name is not required).
+instance at collin.tx.publicsearch.us). Records built here are address-only
+(doc_id is always '') until the enrichment pass below fills in a name where
+it can. base.py's build_record() and main.py's `_useful()` already support
+address-only records (an address alone is kept -- a name is not required).
+
+Owner-name enrichment: after building address-only records from this
+portal, scrape() calls scrapers/collin_enrich.py, which cross-references
+collin.tx.publicsearch.us (the same publicsearch.us/GovOS platform already
+proven for Bexar/Dallas/Tarrant/Denton/Johnson) by street address and OCRs
+just the matching documents to recover the owner name. This never changes
+which records exist or their addresses -- see that module's docstring for
+the matching/OCR approach and its known limitations.
 
 Property Type filtering -- the hint vs. reality:
   The business's hint was to select "Residential Single Family" and
@@ -103,6 +110,7 @@ from datetime import date
 from typing import Dict, List, Optional
 
 from .base import BaseScraper, is_residential_lead, launch_chromium
+from .collin_enrich import enrich_with_owner_names
 
 SEARCH_URL = "https://apps2.collincountytx.gov/ForeclosureNotices"
 
@@ -275,6 +283,13 @@ class CollinCountyScraper(BaseScraper):
 
         records = self._build_records(raw_rows, target_date)
         self.logger.info(f"Collin: {len(records)} final records")
+
+        try:
+            enrich_with_owner_names(records, target_date, self.logger)
+        except Exception as exc:
+            self.logger.error(f"Collin: name enrichment crashed (addresses unaffected): {exc}",
+                               exc_info=True)
+
         return records
 
     # ── Pagination + row extraction ─────────────────────────────────────────
