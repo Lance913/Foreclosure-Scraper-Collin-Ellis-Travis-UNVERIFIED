@@ -2,8 +2,9 @@ name: Daily Foreclosure Scraper (Collin/Ellis/Travis)
 
 on:
   schedule:
-    - cron: '15 13 * * *'   # ~7:15 AM CST — offset from the exact hour; GH cron
-                             # is best-effort and commonly fires 1-3h late at :00.
+    # Before 6 AM Texas time (GitHub often starts late, so a backup run follows; the sheet skips rows it has)
+    - cron: '15 8 * * *'    # ~3:15 AM Texas time
+    - cron: '45 9 * * *'    # ~4:45 AM backup
   workflow_dispatch:
     inputs:
       date:
