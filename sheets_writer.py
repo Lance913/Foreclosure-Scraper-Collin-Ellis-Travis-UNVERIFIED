@@ -35,7 +35,11 @@ from google.oauth2.service_account import Credentials
 
 logger = logging.getLogger('sheets_writer')
 
-SPREADSHEET_ID = '1i3u7U-GGvJ95tH4zk0B1TjaGEplNpUd7fyPj-EaoBWE'
+# 2026-10-28: foreclosures all live in the 'Data Extraction' sheet now (same master tab as Harris/Bexar/Dallas/Tarrant/Denton/Johnson).
+# The old 'Data Scraper' sheet is probate-era and no longer written to.
+SPREADSHEET_ID = '1_GocjgjF09KlDT_rURnLNufk-rDU-sG8FOEnHOZHRr8'
+OLD_SPREADSHEET_ID = '1i3u7U-GGvJ95tH4zk0B1TjaGEplNpUd7fyPj-EaoBWE'
+MASTER_TAB = 'Foreclosures'
 
 SCOPES = [
     'https://spreadsheets.google.com/feeds',
@@ -64,7 +68,7 @@ LEADS_SUFFIX = 'Foreclosure'  # per-county tab name: '{County}-Foreclosure'
 
 
 def _leads_tab_name(county: str) -> str:
-    return f"{str(county).strip().title()}-{LEADS_SUFFIX}"
+    return MASTER_TAB   # every county goes on the shared master tab
 
 
 # ── Daily tracker tab ───────────────────────────────────────────────────────
@@ -253,6 +257,13 @@ def reset_all() -> None:
 
 
 def update_daily_tracker(pull_date: str, new_by_county: Dict[str, int]):
+    """2026-10-28: the Data Extraction sheet's 'Daily Counts' tab is rebuilt for all 13 counties from the master tab
+    after every run, so this repo no longer keeps its own tracker."""
+    logger.info(f"Tracker handled centrally (Daily Counts); new today: {dict(new_by_county)}")
+    return
+
+
+def _old_update_daily_tracker(pull_date: str, new_by_county: Dict[str, int]):
     """One row per day on the tracker tab: how many NEW records were added per
     county that day (duplicates excluded — this is genuinely new leads).
 
@@ -282,3 +293,24 @@ def update_daily_tracker(pull_date: str, new_by_county: Dict[str, int]):
             logger.info(f"Tracker {pull_date} (new): {dict(zip(TRACKER_COUNTIES, counts))}")
 
     _with_retry(_do, 'update_daily_tracker')
+
+
+def migrate_old_sheet() -> None:
+    """One-time: copy the rows that were written to the old 'Data Scraper' sheet ('<County>-Foreclosure' tabs) onto the
+    Data Extraction master tab. Dedup makes it safe to run twice."""
+    old = _get_client().open_by_key(OLD_SPREADSHEET_ID)
+    recs = []
+    for ws in old.worksheets():
+        if not ws.title.endswith('-Foreclosure'):
+            continue
+        for r in ws.get_all_records():
+            recs.append({'first_name': r.get('First Name', ''), 'last_name': r.get('Last Name', ''), 'address': r.get('Address', ''),
+                         'city': r.get('City', ''), 'state': r.get('State', ''), 'zip_code': str(r.get('Zip Code', '')),
+                         'county': r.get('County', ''), 'file_date': r.get('Foreclosure File Date', ''), 'sale_date': r.get('Sale Date', ''),
+                         'doc_id': str(r.get('Doc ID', '')), '_pulled': r.get('Date Pulled', '')})
+        logger.info(f"{ws.title}: {len(recs)} rows so far")
+    by_pull = {}
+    for r in recs: by_pull.setdefault(r.pop('_pulled'), []).append(r)
+    total = 0
+    for pulled, rs in by_pull.items(): total += len(write_records(rs, pull_date=pulled))
+    logger.info(f"Migrated {total} rows from the old sheet")
