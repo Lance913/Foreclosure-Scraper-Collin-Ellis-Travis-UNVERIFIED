@@ -10,4 +10,16 @@ jobs:
       - run: pip install -r requirements.txt
       - env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-        run: python -c "import logging; logging.basicConfig(level=logging.INFO); import sheets_writer; sheets_writer.migrate_old_sheet()"
+        run: |
+          python - <<'PY'
+          import logging, json, os, traceback
+          logging.basicConfig(level=logging.INFO)
+          try:
+              import sheets_writer
+              print("::notice::service account = " + json.loads(os.environ['GOOGLE_CREDENTIALS']).get('client_email', '?'))
+              sheets_writer.migrate_old_sheet()
+              print("::notice::migration done")
+          except Exception as e:
+              print("::error::" + repr(e)[:900].replace('\n', ' '))
+              raise
+          PY
